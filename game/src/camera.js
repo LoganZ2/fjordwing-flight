@@ -1,4 +1,4 @@
-// FJORDWING — Smooth spring-damped Chase, Cockpit, Wingman & Briefing Orbit cameras.
+// FJORDWING — Smooth spring-damped Chase, 3D Glass Cockpit, Hero Wingman & Briefing Orbit cameras.
 
 import {
   clamp,
@@ -38,23 +38,22 @@ export class FlightCamera {
     const r = craft.basis.right;
     const u = craft.basis.up;
 
-    // Briefing / Hangar live scenic orbit showcasing VX-9 Kestrel over golden-hour Skjold Fjord
+    // Briefing / Hangar live scenic 3/4 hero orbit showcasing sculpted VX-9 Kestrel over golden-hour Skjold Fjord
     if (world.phase === 'briefing') {
-      const ang = world.briefingOrbitAngle ?? 0.56;
-      const dist = 20.0;
+      const ang = world.briefingOrbitAngle ?? 0.62;
+      const dist = 18.5;
       const desiredPos = vec3Add(
         craft.pos,
         vec3Add(
-          vec3Scale(f, Math.cos(ang) * dist * 0.62),
-          vec3Add(vec3Scale(r, Math.sin(ang) * dist), vec3Scale(u, -0.8))
+          vec3Scale(f, Math.cos(ang) * dist * 0.72),
+          vec3Add(vec3Scale(r, Math.sin(ang) * dist), vec3Scale(u, 2.2))
         )
       );
-      // Slight low-angle hero perspective framing VX-9 Kestrel against snow-capped peaks & golden sky
-      const desiredTarget = vec3Add(craft.pos, vec3Add(vec3Scale(f, 2.0), vec3(0, -1.8, 0)));
+      const desiredTarget = vec3Add(craft.pos, vec3Add(vec3Scale(f, 0.8), vec3(0, -0.5, 0)));
       this.pos = desiredPos;
       this.target = desiredTarget;
       this.up = vec3(0, 1, 0);
-      this.fovRad = degToRad(50);
+      this.fovRad = degToRad(48);
       this.initialized = true;
       return;
     }
@@ -65,11 +64,11 @@ export class FlightCamera {
     let desiredFov;
 
     if (this.mode === 'cockpit') {
-      // Eye inside the VX-9 Kestrel canopy looking cleanly down the nose & HUD combiner
-      desiredPos = vec3Add(craft.pos, vec3Add(vec3Scale(f, 2.5), vec3Scale(u, 1.32)));
-      desiredTarget = vec3Add(desiredPos, vec3Scale(f, 250));
+      // Pilot eye inside sculpted VX-9 Kestrel canopy looking cleanly across the 3D nose radome & HUD combiner
+      desiredPos = vec3Add(craft.pos, vec3Add(vec3Scale(f, 1.95), vec3Scale(u, 1.30)));
+      desiredTarget = vec3Add(desiredPos, vec3Add(vec3Scale(f, 250), vec3Scale(u, -4.5)));
       desiredUp = u;
-      desiredFov = degToRad(craft.afterburner ? 68 : 63);
+      desiredFov = degToRad(craft.afterburner ? 66 : 61);
       this.pos = desiredPos;
       this.target = desiredTarget;
       this.up = desiredUp;
@@ -79,30 +78,30 @@ export class FlightCamera {
     }
 
     if (this.mode === 'wingman') {
-      // Dramatic cinematic starboard-quarter beauty angle
+      // Dramatic full-frame starboard-aft 3/4 wingman camera framing the ENTIRE sculpted VX-9 Kestrel
+      // cleanly above bottom HUD, with glowing target gate, snow-capped spires & sunrise sky above!
       desiredPos = vec3Add(
         craft.pos,
-        vec3Add(vec3Scale(f, -15.5), vec3Add(vec3Scale(r, 14.2), vec3Scale(u, 4.5)))
+        vec3Add(vec3Scale(f, -19.5), vec3Add(vec3Scale(r, 15.2), vec3Scale(u, 2.5)))
       );
-      desiredTarget = vec3Add(craft.pos, vec3Scale(f, 18.0));
-      desiredUp = vec3Norm(vec3Lerp(vec3(0, 1, 0), u, 0.28));
-      desiredFov = degToRad(56);
+      desiredTarget = vec3Add(craft.pos, vec3Add(vec3Scale(f, 15.0), vec3Add(vec3Scale(r, -2.6), vec3Scale(u, 1.5))));
+      desiredUp = vec3Norm(vec3Lerp(vec3(0, 1, 0), u, 0.14));
+      desiredFov = degToRad(54);
     } else {
       // Chase camera: spring-damped behind & slightly above aircraft, never fighting pilot inputs
       const speedNorm = clamp((craft.speed - 55) / 145, 0, 1);
-      const backDist = 18.8 + speedNorm * 3.4 + (craft.afterburner ? 1.8 : 0);
-      const heightOff = 4.6 + (craft.onGround ? 0.8 : 0);
+      const backDist = 17.6 + speedNorm * 3.0 + (craft.afterburner ? 1.5 : 0);
+      const heightOff = (craft.gearDeployed ? 3.55 : 4.35) + (craft.onGround ? 0.8 : 0);
       desiredPos = vec3Add(
         craft.pos,
-        vec3Add(vec3Scale(f, -backDist), vec3Add(vec3Scale(u, heightOff * 0.55), vec3(0, heightOff * 0.52, 0)))
+        vec3Add(vec3Scale(f, -backDist), vec3Add(vec3Scale(u, heightOff * 0.56), vec3(0, heightOff * 0.48, 0)))
       );
-      desiredTarget = vec3Add(craft.pos, vec3Add(vec3Scale(f, 52.0), vec3Scale(u, 1.2)));
-      // Subtle bank coupling (32% roll follow) keeps horizon natural while feeling kinetic!
+      desiredTarget = vec3Add(craft.pos, vec3Add(vec3Scale(f, 52.0), vec3Scale(u, 1.0)));
       desiredUp = vec3Norm(vec3Lerp(vec3(0, 1, 0), u, 0.30));
-      desiredFov = degToRad(58 + speedNorm * 8 + (craft.afterburner ? 5 : 0));
+      desiredFov = degToRad(56 + speedNorm * 7 + (craft.afterburner ? 4 : 0));
     }
 
-    // Prevent chase camera from dipping beneath water or fjord terrain
+    // Prevent external camera from dipping beneath ocean or fjord terrain
     const groundY = Math.max(2.5, getTerrainHeight(desiredPos.x, desiredPos.z) + 3.2);
     if (desiredPos.y < groundY) desiredPos.y = groundY;
 

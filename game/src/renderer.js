@@ -1,6 +1,8 @@
-// FJORDWING — WebGL2 rendering pipeline for sky, terrain, ocean, runway, landmarks, rings, aircraft & contrails.
+// FJORDWING — WebGL2 rendering pipeline for golden-hour sky, heightmap-shadowed terrain,
+// Fresnel fjord ocean with reflections & shoreline foam, wet runway, landmarks, volumetric clouds,
+// sculpted VX-9 Kestrel aircraft, Mach afterburners, lighthouse beam & crossed contrail ribbons.
 
-import { RUNWAY } from './config.js';
+import { RUNWAY, WORLD } from './config.js';
 import {
   mat4Identity,
   mat4Perspective,
@@ -25,15 +27,20 @@ import {
   WATER_FS,
   MESH_VS,
   MESH_FS,
+  CLOUD_VS,
+  CLOUD_FS,
   FX_VS,
   FX_FS,
 } from './shaders.js';
 import {
+  getTerrainHeight,
+  buildHeightmapTextureData,
   buildTerrainMesh,
   buildWaterMesh,
   buildRunwayMesh,
   buildLandmarksMesh,
-  buildCloudsMesh,
+  buildLighthouseBeamGeometry,
+  buildCloudBillboards,
 } from './terrain.js';
 import {
   buildAircraftGeometry,
@@ -126,8 +133,27 @@ export class FjordRenderer {
       runway: createProgram(gl, RUNWAY_VS, RUNWAY_FS),
       water: createProgram(gl, WATER_VS, WATER_FS),
       mesh: createProgram(gl, MESH_VS, MESH_FS),
+      cloud: createProgram(gl, CLOUD_VS, CLOUD_FS),
       fx: createProgram(gl, FX_VS, FX_FS),
     };
+
+    // Bake 512x512 RGBA8 heightmap + coastal bathymetry + valley AO GPU texture
+    const hm = buildHeightmapTextureData();
+    this.heightMapTex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.heightMapTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, hm.width, hm.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, hm.data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    this.worldBounds = [
+      -WORLD.HALF,
+      WORLD.SIZE,
+      WORLD.HEIGHT_MIN,
+      WORLD.HEIGHT_MAX - WORLD.HEIGHT_MIN,
+    ];
 
     // Fullscreen sky quad
     const skyVerts = new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]);
@@ -151,20 +177,26 @@ export class FjordRenderer {
     this.runwayCount = runway.count;
 
     const meshAttribs = [{ loc: 0, size: 3 }, { loc: 1, size: 3 }, { loc: 2, size: 4 }];
+    const cloudAttribs = [{ loc: 0, size: 3 }, { loc: 1, size: 2 }, { loc: 2, size: 2 }, { loc: 3, size: 3 }];
     const fxAttribs = [{ loc: 0, size: 3 }, { loc: 1, size: 4 }];
 
     const landmarks = buildLandmarksMesh();
     this.landmarksVao = createMeshVao(gl, landmarks.vertices, meshAttribs);
     this.landmarksCount = landmarks.count;
 
-    const clouds = buildCloudsMesh(7);
-    this.cloudsVao = createMeshVao(gl, clouds.vertices, meshAttribs);
+    const clouds = buildCloudBillboards(11);
+    this.cloudsVao = createMeshVao(gl, clouds.vertices, cloudAttribs);
     this.cloudsCount = clouds.count;
 
-    // Aircraft parts
+    const beam = buildLighthouseBeamGeometry();
+    this.beamVao = { ...createMeshVao(gl, beam.vertices, fxAttribs), count: beam.count };
+    this.lighthouseLanternY = getTerrainHeight(RUNWAY.LIGHTHOUSE_X, RUNWAY.LIGHTHOUSE_Z) + 36.8;
+
+    // Sculpted VX-9 Kestrel aircraft parts
     const craft = buildAircraftGeometry();
     this.aircraftVaos = {
       body: { ...createMeshVao(gl, craft.body.vertices, meshAttribs), count: craft.body.count },
+      cockpitExterior: { ...createMeshVao(gl, craft.cockpitExterior.vertices, meshAttribs), count: craft.cockpitExterior.count },
       navLights: { ...createMeshVao(gl, craft.navLights.vertices, meshAttribs), count: craft.navLights.count },
       gear: { ...createMeshVao(gl, craft.gear.vertices, meshAttribs), count: craft.gear.count },
       flaps: { ...createMeshVao(gl, craft.flaps.vertices, meshAttribs), count: craft.flaps.count },
@@ -172,18 +204,18 @@ export class FjordRenderer {
     };
 
     // Target checkpoint ring & PAPI lamp meshes
-    const ring = buildTargetRingGeometry(32, 2.5);
+    const ring = buildTargetRingGeometry(32, 2.3);
     this.ringVao = { ...createMeshVao(gl, ring.vertices, fxAttribs), count: ring.count };
 
     const lamp = buildLampGeometry();
     this.lampVao = { ...createMeshVao(gl, lamp.vertices, fxAttribs), count: lamp.count };
 
-    // Dynamic wingtip contrail ribbon buffer
+    // Dynamic crossed wingtip contrail ribbon buffer
     this.trailVao = gl.createVertexArray();
     gl.bindVertexArray(this.trailVao);
     this.trailVbo = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.trailVbo);
-    this.trailScratch = new Float32Array(2400 * 7);
+    this.trailScratch = new Float32Array(4800 * 7);
     gl.bufferData(gl.ARRAY_BUFFER, this.trailScratch.byteLength, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
@@ -209,7 +241,7 @@ export class FjordRenderer {
     const sunDir = vec3Norm({ x: weather.sunDir[0], y: weather.sunDir[1], z: weather.sunDir[2] });
     const sunArr = [sunDir.x, sunDir.y, sunDir.z];
 
-    const proj = mat4Perspective(camera.fovRad, aspect, 0.8, 17500);
+    const proj = mat4Perspective(camera.fovRad, aspect, 0.7, 17500);
     const view = mat4LookAt(camera.pos, camera.target, camera.up);
     const viewProj = mat4Multiply(proj, view);
     this.viewProj = viewProj;
@@ -218,6 +250,9 @@ export class FjordRenderer {
     const camRight = vec3Norm(vec3Cross(camForward, camera.up));
     const camUp = vec3Cross(camRight, camForward);
 
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.heightMapTex);
+
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.enable(gl.CULL_FACE);
@@ -225,7 +260,7 @@ export class FjordRenderer {
     gl.disable(gl.BLEND);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    // 1. Atmospheric Rayleigh/Mie Sky Dome
+    // 1. Atmospheric Rayleigh/Mie Sky Dome + Radiant Sun Rays + Volumetric Sky Clouds
     {
       const p = this.programs.sky;
       gl.useProgram(p.prog);
@@ -249,12 +284,14 @@ export class FjordRenderer {
       gl.depthMask(true);
     }
 
-    // 2. Multi-Biome Nordic Fjord Terrain
+    // 2. Heightmap-Shadowed, Micro-Normal-Mapped Nordic Fjord Terrain
     {
       const p = this.programs.terrain;
       gl.useProgram(p.prog);
       gl.enable(gl.CULL_FACE);
       gl.uniformMatrix4fv(p.uniforms.uViewProj, false, viewProj);
+      gl.uniform1i(p.uniforms.uHeightMap, 0);
+      gl.uniform4fv(p.uniforms.uWorldBounds, this.worldBounds);
       gl.uniform3f(p.uniforms.uCamPos, camera.pos.x, camera.pos.y, camera.pos.z);
       gl.uniform3fv(p.uniforms.uSunDir, sunArr);
       gl.uniform3fv(p.uniforms.uSunColor, weather.sunColor);
@@ -268,12 +305,14 @@ export class FjordRenderer {
       gl.drawElements(gl.TRIANGLES, this.terrainVao.indexCount, gl.UNSIGNED_INT, 0);
     }
 
-    // 3. Shimmering Fresnel Fjord Ocean
+    // 3. Glacial Fresnel Fjord Ocean (Bathymetry, Shoreline Surf Foam, Mountain Reflections & Shadows!)
     {
       const p = this.programs.water;
       gl.useProgram(p.prog);
       gl.disable(gl.CULL_FACE);
       gl.uniformMatrix4fv(p.uniforms.uViewProj, false, viewProj);
+      gl.uniform1i(p.uniforms.uHeightMap, 0);
+      gl.uniform4fv(p.uniforms.uWorldBounds, this.worldBounds);
       gl.uniform3f(p.uniforms.uCamPos, camera.pos.x, camera.pos.y, camera.pos.z);
       gl.uniform3fv(p.uniforms.uSunDir, sunArr);
       gl.uniform3fv(p.uniforms.uSunColor, weather.sunColor);
@@ -287,7 +326,7 @@ export class FjordRenderer {
       gl.drawArrays(gl.TRIANGLES, 0, this.waterCount);
     }
 
-    // 4. Painted Asphalt Runway 09/27 Deck
+    // 4. Wet-Sheen Painted Asphalt Runway 09/27 Deck
     {
       const p = this.programs.runway;
       gl.useProgram(p.prog);
@@ -300,12 +339,13 @@ export class FjordRenderer {
       gl.uniform3fv(p.uniforms.uFogColor, weather.fogColor);
       gl.uniform3fv(p.uniforms.uHorizonColor, weather.horizonColor);
       gl.uniform1f(p.uniforms.uFogDensity, weather.fogDensity);
+      gl.uniform1f(p.uniforms.uWetness, weather.wetness ?? 0.20);
       gl.uniform1f(p.uniforms.uExposure, weather.exposure);
       gl.bindVertexArray(this.runwayVao.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this.runwayCount);
     }
 
-    // 5. PBR Lit Meshes: Airstrip Landmarks, Volumetric Cloud Banks & VX-9 Kestrel Aircraft
+    // 5. PBR Lit Meshes: Airstrip Landmarks, Nordic Village & Sculpted VX-9 Kestrel Aircraft
     {
       const p = this.programs.mesh;
       gl.useProgram(p.prog);
@@ -316,6 +356,7 @@ export class FjordRenderer {
       gl.uniform3fv(p.uniforms.uSunColor, weather.sunColor);
       gl.uniform3fv(p.uniforms.uAmbientSky, weather.ambientSky);
       gl.uniform3fv(p.uniforms.uAmbientGround, weather.ambientGround);
+      gl.uniform3fv(p.uniforms.uZenithColor, weather.zenithColor);
       gl.uniform3fv(p.uniforms.uHorizonColor, weather.horizonColor);
       gl.uniform3fv(p.uniforms.uFogColor, weather.fogColor);
       gl.uniform1f(p.uniforms.uFogDensity, weather.fogDensity);
@@ -323,27 +364,25 @@ export class FjordRenderer {
       gl.uniform3f(p.uniforms.uEmissiveTint, 0, 0, 0);
       gl.uniform1f(p.uniforms.uAlpha, 1.0);
 
-      // Static landmarks (hangars, tower, lighthouse, approach pylons, pines)
-      gl.uniform1f(p.uniforms.uFogScale, 0.95);
+      // Static landmarks (hangars, tower, Nordic village, lighthouse, pines, boulders, approach pylons)
+      gl.uniform1f(p.uniforms.uIsAircraft, 0.0);
+      gl.uniform1f(p.uniforms.uFogScale, 0.92);
       gl.uniformMatrix4fv(p.uniforms.uModel, false, mat4Identity());
       gl.bindVertexArray(this.landmarksVao.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this.landmarksCount);
 
-      // Sunlit 3D cloud clusters (gentle wind drift)
-      gl.uniform1f(p.uniforms.uFogScale, 0.45);
-      const driftX = (world.time * 4.5) % 800;
-      const cloudModel = mat4TranslateScale(driftX * 0.2, 0, 0, 1, 1, 1);
-      gl.uniformMatrix4fv(p.uniforms.uModel, false, cloudModel);
-      gl.bindVertexArray(this.cloudsVao.vao);
-      gl.drawArrays(gl.TRIANGLES, 0, this.cloudsCount);
+      // Sculpted VX-9 Kestrel Aircraft
+      const craft = world.aircraft;
+      const craftModel = mat4FromBasis(craft.pos, craft.basis, 1.0);
+      gl.uniform1f(p.uniforms.uIsAircraft, 1.0);
+      gl.uniform1f(p.uniforms.uFogScale, 0.22);
+      gl.uniformMatrix4fv(p.uniforms.uModel, false, craftModel);
 
-      // VX-9 Kestrel Aircraft (skip body in cockpit view so fuselage never clips the glass HUD)
-      if (camera.mode !== 'cockpit') {
-        const craft = world.aircraft;
-        const craftModel = mat4FromBasis(craft.pos, craft.basis, 1.0);
-        gl.uniform1f(p.uniforms.uFogScale, 0.25);
-        gl.uniformMatrix4fv(p.uniforms.uModel, false, craftModel);
-
+      if (camera.mode === 'cockpit') {
+        // Render only forward nose radome & wing strakes so pilot sees the sculpted jet nose out the canopy!
+        gl.bindVertexArray(this.aircraftVaos.cockpitExterior.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, this.aircraftVaos.cockpitExterior.count);
+      } else {
         gl.bindVertexArray(this.aircraftVaos.body.vao);
         gl.drawArrays(gl.TRIANGLES, 0, this.aircraftVaos.body.count);
 
@@ -356,16 +395,43 @@ export class FjordRenderer {
           gl.drawArrays(gl.TRIANGLES, 0, this.aircraftVaos.flaps.count);
         }
 
-        // Pulsing wingtip nav strobes
         const pulse = 0.72 + 0.55 * Math.sin(world.time * 7.5);
-        gl.uniform3f(p.uniforms.uEmissiveTint, 0.2 * pulse, 0.2 * pulse, 0.2 * pulse);
+        gl.uniform3f(p.uniforms.uEmissiveTint, 0.22 * pulse, 0.22 * pulse, 0.22 * pulse);
         gl.bindVertexArray(this.aircraftVaos.navLights.vao);
         gl.drawArrays(gl.TRIANGLES, 0, this.aircraftVaos.navLights.count);
         gl.uniform3f(p.uniforms.uEmissiveTint, 0, 0, 0);
       }
     }
 
-    // 6. Emissive Additive & Translucent FX: PAPI Glideslope Lights, Glowing Aerial Rings, Afterburner, Contrails
+    // 6. Soft Volumetric-Style FBM Cloud Billboards (Zero Hard Geometric Edges!)
+    {
+      const p = this.programs.cloud;
+      gl.useProgram(p.prog);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.disable(gl.CULL_FACE);
+
+      const driftX = (world.time * 3.8) % 900;
+      gl.uniformMatrix4fv(p.uniforms.uViewProj, false, viewProj);
+      gl.uniform3f(p.uniforms.uCamRight, camRight.x, camRight.y, camRight.z);
+      gl.uniform3f(p.uniforms.uCamUp, camUp.x, camUp.y, camUp.z);
+      gl.uniform3f(p.uniforms.uDrift, driftX * 0.2, 0, 0);
+      gl.uniform3f(p.uniforms.uCamPos, camera.pos.x, camera.pos.y, camera.pos.z);
+      gl.uniform3fv(p.uniforms.uSunDir, sunArr);
+      gl.uniform3fv(p.uniforms.uSunColor, weather.sunColor);
+      gl.uniform3fv(p.uniforms.uCloudTint, weather.cloudTint);
+      gl.uniform3fv(p.uniforms.uCloudShadow, weather.cloudShadow);
+      gl.uniform3fv(p.uniforms.uHorizonColor, weather.horizonColor);
+      gl.uniform3fv(p.uniforms.uFogColor, weather.fogColor);
+      gl.uniform1f(p.uniforms.uFogDensity, weather.fogDensity);
+      gl.uniform1f(p.uniforms.uExposure, weather.exposure);
+
+      gl.bindVertexArray(this.cloudsVao.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this.cloudsCount);
+    }
+
+    // 7. Emissive Additive & Translucent FX: PAPI Lamps, Rotating Lighthouse Beam, Rings, Mach Plumes & Contrails
     {
       const p = this.programs.fx;
       gl.useProgram(p.prog);
@@ -375,26 +441,38 @@ export class FjordRenderer {
       gl.depthMask(false);
       gl.disable(gl.CULL_FACE);
 
-      // 6a. Dynamic 4-lamp PAPI Glideslope Light Bar next to Runway 09 (distinct ruby-RED vs crisp WHITE!)
+      // 7a. Rotating Volumetric Golden Lighthouse Beam sweeping across Skjold Bay
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      const beamYaw = -2.35 + Math.sin(world.time * 0.45) * 0.65;
+      const beamT = mat4TranslateScale(RUNWAY.LIGHTHOUSE_X, this.lighthouseLanternY, RUNWAY.LIGHTHOUSE_Z, 1.0);
+      const beamModel = mat4Multiply(beamT, mat4RotateY(beamYaw));
+      gl.uniformMatrix4fv(p.uniforms.uModel, false, beamModel);
+      gl.uniform3f(p.uniforms.uTint, 1.0, 0.85, 0.45);
+      gl.uniform1f(p.uniforms.uIntensity, 1.35);
+      gl.uniform1f(p.uniforms.uAlpha, 0.55);
+      gl.bindVertexArray(this.beamVao.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this.beamVao.count);
+
+      // 7b. Dynamic 4-lamp PAPI Glideslope Light Bar next to Runway 09 (crisp 2-WHITE / 2-RED!)
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      const papiStates = world.papiLights; // array of 4 booleans: true=WHITE (high), false=RED (low)
+      const papiStates = world.papiLights;
       for (let i = 0; i < 4; i++) {
         const isWhite = papiStates[i];
-        const m = mat4TranslateScale(RUNWAY.PAPI_X, RUNWAY.ELEVATION + 2.6, RUNWAY.PAPI_Z - i * 8.5, 1.28);
+        const m = mat4TranslateScale(RUNWAY.PAPI_X, RUNWAY.ELEVATION + 2.6, RUNWAY.PAPI_Z - i * 8.5, 1.24);
         gl.uniformMatrix4fv(p.uniforms.uModel, false, m);
         if (isWhite) {
-          gl.uniform3f(p.uniforms.uTint, 1.0, 0.96, 0.86);
-          gl.uniform1f(p.uniforms.uIntensity, 1.9);
+          gl.uniform3f(p.uniforms.uTint, 1.0, 0.97, 0.88);
+          gl.uniform1f(p.uniforms.uIntensity, 2.2);
         } else {
-          gl.uniform3f(p.uniforms.uTint, 1.0, 0.04, 0.02);
-          gl.uniform1f(p.uniforms.uIntensity, 1.45);
+          gl.uniform3f(p.uniforms.uTint, 1.0, 0.05, 0.02);
+          gl.uniform1f(p.uniforms.uIntensity, 1.75);
         }
         gl.uniform1f(p.uniforms.uAlpha, 0.98);
         gl.bindVertexArray(this.lampVao.vao);
         gl.drawArrays(gl.TRIANGLES, 0, this.lampVao.count);
       }
 
-      // 6b. Glowing Rotating Aerial Checkpoint Target Rings
+      // 7c. Glowing Rotating Aerial Checkpoint Target Rings
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       const rings = world.rings;
       for (let i = 0; i < rings.length; i++) {
@@ -415,18 +493,16 @@ export class FjordRenderer {
         const pulse = 0.92 + 0.12 * Math.sin(world.time * 4.5 + i);
 
         if (ring.kind === 'fuel') {
-          gl.uniform3f(p.uniforms.uTint, 0.08, 0.86, 1.0);
-          gl.uniform1f(p.uniforms.uIntensity, (isActive ? 1.85 : 1.15) * pulse);
-          gl.uniform1f(p.uniforms.uAlpha, isActive ? 0.94 : 0.45);
+          gl.uniform3f(p.uniforms.uTint, 0.08, 0.90, 1.0);
+          gl.uniform1f(p.uniforms.uIntensity, (isActive ? 2.1 : 1.25) * pulse);
+          gl.uniform1f(p.uniforms.uAlpha, isActive ? 0.95 : 0.48);
         } else if (isActive) {
-          // Active ring: saturated fiery electric amber-orange!
-          gl.uniform3f(p.uniforms.uTint, 1.0, 0.46, 0.03);
-          gl.uniform1f(p.uniforms.uIntensity, 1.85 * pulse);
+          gl.uniform3f(p.uniforms.uTint, 1.0, 0.48, 0.04);
+          gl.uniform1f(p.uniforms.uIntensity, 2.0 * pulse);
           gl.uniform1f(p.uniforms.uAlpha, 0.96);
         } else {
-          // Upcoming ring: crisp emerald-cyan guide
-          gl.uniform3f(p.uniforms.uTint, 0.05, 0.95, 0.48);
-          gl.uniform1f(p.uniforms.uIntensity, isNext ? 1.45 : 0.95);
+          gl.uniform3f(p.uniforms.uTint, 0.06, 0.96, 0.52);
+          gl.uniform1f(p.uniforms.uIntensity, isNext ? 1.5 : 0.95);
           gl.uniform1f(p.uniforms.uAlpha, isNext ? 0.72 : 0.36);
         }
 
@@ -434,25 +510,26 @@ export class FjordRenderer {
         gl.drawArrays(gl.TRIANGLES, 0, this.ringVao.count);
       }
 
-      // 6c. Twin Afterburner Plumes (vivid cobalt-to-amber when A/B engaged; subtle short core at low cruise/approach)
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      // 7d. Twin Mach Shock-Diamond Afterburner Plumes (Rich Cobalt-to-Amber when A/B; subtle cool idle core on approach!)
       const craft = world.aircraft;
       if (camera.mode !== 'cockpit' && craft.fuel > 0 && craft.throttle > 0.18) {
-        const flicker = 0.94 + 0.12 * Math.sin(world.time * 46.0);
+        const flicker = 0.95 + 0.10 * Math.sin(world.time * 46.0);
         const baseModel = mat4FromBasis(craft.pos, craft.basis, 1.0);
         const scaleZ = mat4Identity();
         if (craft.afterburner) {
-          scaleZ[10] = 1.05 * flicker;
-          scaleZ[14] = 7.15 * (1 - scaleZ[10]);
-          gl.uniform3f(p.uniforms.uTint, 1.0, 0.56, 0.16);
-          gl.uniform1f(p.uniforms.uIntensity, 1.75);
-          gl.uniform1f(p.uniforms.uAlpha, 0.88);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+          scaleZ[10] = 1.06 * flicker;
+          scaleZ[14] = 7.12 * (1 - scaleZ[10]);
+          gl.uniform3f(p.uniforms.uTint, 1.0, 0.56, 0.18);
+          gl.uniform1f(p.uniforms.uIntensity, 1.55);
+          gl.uniform1f(p.uniforms.uAlpha, 0.86);
         } else {
-          scaleZ[10] = (0.18 + craft.throttle * 0.24) * flicker;
-          scaleZ[14] = 7.15 * (1 - scaleZ[10]);
-          gl.uniform3f(p.uniforms.uTint, 0.28, 0.64, 1.0);
-          gl.uniform1f(p.uniforms.uIntensity, 1.25);
-          gl.uniform1f(p.uniforms.uAlpha, 0.52);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          scaleZ[10] = (0.10 + craft.throttle * 0.14) * flicker;
+          scaleZ[14] = 7.12 * (1 - scaleZ[10]);
+          gl.uniform3f(p.uniforms.uTint, 0.24, 0.52, 0.95);
+          gl.uniform1f(p.uniforms.uIntensity, 0.85);
+          gl.uniform1f(p.uniforms.uAlpha, 0.36);
         }
         const plumeModel = mat4Multiply(baseModel, scaleZ);
         gl.uniformMatrix4fv(p.uniforms.uModel, false, plumeModel);
@@ -460,7 +537,7 @@ export class FjordRenderer {
         gl.drawArrays(gl.TRIANGLES, 0, this.aircraftVaos.plumes.count);
       }
 
-      // 6d. Wingtip Contrail / Vortex Ribbons
+      // 7e. Crossed Volumetric Wingtip Contrail / Vortex Ribbons
       this.renderContrails(world, p);
 
       gl.depthMask(true);
@@ -475,38 +552,41 @@ export class FjordRenderer {
     const buf = this.trailScratch;
     const maxVerts = buf.length / 7;
 
+    const pushPt = (x, y, z, r, g, b, a) => {
+      const base = vCount * 7;
+      buf[base] = x; buf[base + 1] = y; buf[base + 2] = z;
+      buf[base + 3] = r; buf[base + 4] = g; buf[base + 5] = b; buf[base + 6] = a;
+      vCount++;
+    };
+
     for (const ribbon of trails) {
       if (ribbon.length < 2) continue;
       for (let i = 0; i < ribbon.length - 1; i++) {
-        if (vCount + 6 > maxVerts) break;
+        if (vCount + 12 > maxVerts) break;
         const a = ribbon[i];
         const b = ribbon[i + 1];
         const t0 = i / (ribbon.length - 1);
         const t1 = (i + 1) / (ribbon.length - 1);
-        const w0 = 0.22 + (1 - t0) * 0.45;
-        const w1 = 0.22 + (1 - t1) * 0.45;
+        const w0 = 0.16 + (1 - t0) * 0.42;
+        const w1 = 0.16 + (1 - t1) * 0.42;
         const al0 = t0 * t0 * a.alpha;
         const al1 = t1 * t1 * b.alpha;
 
-        const pts = [
-          [a.x, a.y - w0, a.z, 0.94, 0.97, 1.0, al0],
-          [a.x, a.y + w0, a.z, 0.94, 0.97, 1.0, al0],
-          [b.x, b.y + w1, b.z, 0.94, 0.97, 1.0, al1],
-          [a.x, a.y - w0, a.z, 0.94, 0.97, 1.0, al0],
-          [b.x, b.y + w1, b.z, 0.94, 0.97, 1.0, al1],
-          [b.x, b.y - w1, b.z, 0.94, 0.97, 1.0, al1],
-        ];
-        for (const pt of pts) {
-          const base = vCount * 7;
-          buf[base] = pt[0];
-          buf[base + 1] = pt[1];
-          buf[base + 2] = pt[2];
-          buf[base + 3] = pt[3];
-          buf[base + 4] = pt[4];
-          buf[base + 5] = pt[5];
-          buf[base + 6] = pt[6];
-          vCount++;
-        }
+        // Vertical ribbon fin
+        pushPt(a.x, a.y - w0, a.z, 0.96, 0.98, 1.0, al0);
+        pushPt(a.x, a.y + w0, a.z, 0.96, 0.98, 1.0, al0);
+        pushPt(b.x, b.y + w1, b.z, 0.96, 0.98, 1.0, al1);
+        pushPt(a.x, a.y - w0, a.z, 0.96, 0.98, 1.0, al0);
+        pushPt(b.x, b.y + w1, b.z, 0.96, 0.98, 1.0, al1);
+        pushPt(b.x, b.y - w1, b.z, 0.96, 0.98, 1.0, al1);
+
+        // Horizontal ribbon fin (ensures contrail stays lush from top-down & wingman angles!)
+        pushPt(a.x - w0, a.y, a.z - w0 * 0.5, 0.96, 0.98, 1.0, al0);
+        pushPt(a.x + w0, a.y, a.z + w0 * 0.5, 0.96, 0.98, 1.0, al0);
+        pushPt(b.x + w1, b.y, b.z + w1 * 0.5, 0.96, 0.98, 1.0, al1);
+        pushPt(a.x - w0, a.y, a.z - w0 * 0.5, 0.96, 0.98, 1.0, al0);
+        pushPt(b.x + w1, b.y, b.z + w1 * 0.5, 0.96, 0.98, 1.0, al1);
+        pushPt(b.x - w1, b.y, b.z - w1 * 0.5, 0.96, 0.98, 1.0, al1);
       }
     }
 
@@ -514,8 +594,8 @@ export class FjordRenderer {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.uniformMatrix4fv(program.uniforms.uModel, false, mat4Identity());
       gl.uniform3f(program.uniforms.uTint, 1.0, 0.96, 0.92);
-      gl.uniform1f(program.uniforms.uIntensity, 1.15);
-      gl.uniform1f(program.uniforms.uAlpha, 0.55);
+      gl.uniform1f(program.uniforms.uIntensity, 1.25);
+      gl.uniform1f(program.uniforms.uAlpha, 0.58);
       gl.bindVertexArray(this.trailVao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.trailVbo);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, buf.subarray(0, vCount * 7));

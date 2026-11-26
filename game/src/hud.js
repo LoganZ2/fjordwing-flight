@@ -1,20 +1,23 @@
-// FJORDWING — High-DPI collimated vector Chase/Wingman HUD, ILS guidance, corner radar & storm rain overlay.
+// FJORDWING — Sleek frameless collimated military fighter HUD, topographic fjord radar, ILS & storm rain overlay.
 
 import { HUD_COLORS, RUNWAY, WORLD } from './config.js';
-import { clamp, degToRad, projectWorldPoint, vec3Add, vec3Dist, vec3Scale, wrapAngleDeg } from './math.js';
+import { clamp, degToRad, projectWorldPoint, radToDeg, vec3Add, vec3Dist, vec3Scale, wrapAngleDeg } from './math.js';
 import { getTerrainHeight } from './terrain.js';
 
-// Precomputed miniature terrain elevation grid for crisp Fjord Tactical Radar
+// Precomputed high-res miniature terrain elevation grid for crisp Fjord Topographic Radar
 const RADAR_CACHE = (() => {
-  const N = 48;
-  const half = 2800;
+  const N = 64;
+  const half = 2850;
   const grid = new Uint8Array(N * N);
   for (let iz = 0; iz < N; iz++) {
     const z = -half + (iz / (N - 1)) * half * 2;
     for (let ix = 0; ix < N; ix++) {
       const x = -half + (ix / (N - 1)) * half * 2;
       const h = getTerrainHeight(x, z);
-      grid[iz * N + ix] = h > 2 ? (h > 260 ? 2 : 1) : 0;
+      if (h <= 1.5) grid[iz * N + ix] = 0;
+      else if (h < 95) grid[iz * N + ix] = 1;
+      else if (h < 250) grid[iz * N + ix] = 2;
+      else grid[iz * N + ix] = 3;
     }
   }
   return { N, half, grid };
@@ -37,19 +40,90 @@ export function formatMissionTime(sec) {
   return `${String(mins).padStart(2, '0')}:${rem.toFixed(1).padStart(4, '0')}`;
 }
 
-export function drawTacticalRadar(ctx, cx, cy, radius, world, rangeM = 2600) {
+// High-contrast subtle dark shadow halo so frameless HUD vector strokes pop crisply over bright golden sky!
+function setHudGlow(ctx, blur = 5) {
+  ctx.shadowColor = 'rgba(0, 10, 16, 0.82)';
+  ctx.shadowBlur = blur;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 1;
+}
+
+function clearHudGlow(ctx) {
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+}
+
+export function drawTacticalRadar(ctx, cx, cy, radius, world, rangeM = 2600, showLabel = true) {
   const craft = world.aircraft;
   const hdgRad = degToRad(craft.telemetry.headingDeg);
+  const mono = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
   ctx.save();
+
+  // Outer soft drop shadow
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(3, 9, 16, 0.56)';
+  ctx.fill();
+
+  // Glass scope aperture
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(7, 17, 27, 0.84)';
+  const bgGrad = ctx.createRadialGradient(cx, cy, radius * 0.1, cx, cy, radius);
+  bgGrad.addColorStop(0, 'rgba(8, 24, 36, 0.80)');
+  bgGrad.addColorStop(0.82, 'rgba(4, 14, 24, 0.88)');
+  bgGrad.addColorStop(1, 'rgba(2, 9, 16, 0.94)');
+  ctx.fillStyle = bgGrad;
   ctx.fill();
   ctx.clip();
 
-  // Subtle range rings & crosshairs
-  ctx.strokeStyle = 'rgba(60, 255, 142, 0.16)';
+  // Transform world coordinates into heading-up radar space
+  const scale = radius / rangeM;
+  const cosH = Math.cos(-hdgRad);
+  const sinH = Math.sin(-hdgRad);
+  function worldToRadar(wx, wz) {
+    const dx = wx - craft.pos.x;
+    const dz = wz - craft.pos.z;
+    const rx = dx * cosH + dz * sinH;
+    const ry = -dx * sinH + dz * cosH;
+    return { x: cx + rx * scale, y: cy + ry * scale };
+  }
+
+  // Plot Skjold Fjord multi-elevation topographic contours
+  const { N, half, grid } = RADAR_CACHE;
+  const cellW = (half * 2) / (N - 1);
+  const dotSz = Math.max(2.6, (cellW * scale) * 1.15);
+  for (let iz = 0; iz < N; iz++) {
+    const wz = -half + iz * cellW;
+    for (let ix = 0; ix < N; ix++) {
+      const tag = grid[iz * N + ix];
+      if (tag === 0) continue;
+      const wx = -half + ix * cellW;
+      const pt = worldToRadar(wx, wz);
+      if (Math.hypot(pt.x - cx, pt.y - cy) > radius + 3) continue;
+      if (tag === 1) ctx.fillStyle = 'rgba(32, 128, 96, 0.28)';
+      else if (tag === 2) ctx.fillStyle = 'rgba(56, 152, 138, 0.34)';
+      else ctx.fillStyle = 'rgba(148, 212, 240, 0.36)';
+      ctx.fillRect(pt.x - dotSz * 0.5, pt.y - dotSz * 0.5, dotSz, dotSz);
+    }
+  }
+
+  // Animated faint radar sweep wedge
+  const sweepAng = ((world.time * 1.15) % (Math.PI * 2)) - Math.PI * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, radius, sweepAng - 0.42, sweepAng);
+  ctx.closePath();
+  const sweepGrad = ctx.createRadialGradient(cx, cy, 4, cx, cy, radius);
+  sweepGrad.addColorStop(0, 'rgba(75, 255, 155, 0.04)');
+  sweepGrad.addColorStop(1, 'rgba(75, 255, 155, 0.16)');
+  ctx.fillStyle = sweepGrad;
+  ctx.fill();
+
+  // Range rings & crisp reticle ticks
+  ctx.strokeStyle = 'rgba(88, 238, 255, 0.18)';
   ctx.lineWidth = 1;
   for (const frac of [0.35, 0.68]) {
     ctx.beginPath();
@@ -63,46 +137,17 @@ export function drawTacticalRadar(ctx, cx, cy, radius, world, rangeM = 2600) {
   ctx.lineTo(cx, cy + radius);
   ctx.stroke();
 
-  // Transform world coordinates into heading-up radar space
-  const scale = radius / rangeM;
-  const cosH = Math.cos(-hdgRad);
-  const sinH = Math.sin(-hdgRad);
-  function worldToRadar(wx, wz) {
-    const dx = wx - craft.pos.x;
-    const dz = wz - craft.pos.z;
-    // Heading 0 = North (-Z) -> radar up (-Y)
-    const rx = dx * cosH + dz * sinH;
-    const ry = -dx * sinH + dz * cosH;
-    return { x: cx + rx * scale, y: cy + ry * scale };
-  }
-
-  // Plot Skjold Fjord archipelago landmass & alpine ridge blips
-  const { N, half, grid } = RADAR_CACHE;
-  const cellW = (half * 2) / (N - 1);
-  for (let iz = 0; iz < N; iz++) {
-    const wz = -half + iz * cellW;
-    for (let ix = 0; ix < N; ix++) {
-      const tag = grid[iz * N + ix];
-      if (tag === 0) continue;
-      const wx = -half + ix * cellW;
-      const pt = worldToRadar(wx, wz);
-      if (Math.hypot(pt.x - cx, pt.y - cy) > radius + 4) continue;
-      ctx.fillStyle = tag === 2 ? 'rgba(130, 195, 220, 0.28)' : 'rgba(42, 138, 108, 0.25)';
-      ctx.fillRect(pt.x - 2.2, pt.y - 2.2, 4.4, 4.4);
-    }
-  }
-
-  // Runway 09/27 illuminated tarmac bar on radar
+  // Illuminated Runway 09/27 strip
   const r0 = worldToRadar(RUNWAY.START_X, RUNWAY.CENTER_Z);
   const r1 = worldToRadar(RUNWAY.END_X, RUNWAY.CENTER_Z);
-  ctx.strokeStyle = '#FFFFFF';
-  ctx.lineWidth = 4.2;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.90)';
+  ctx.lineWidth = 3.8;
   ctx.beginPath();
   ctx.moveTo(r0.x, r0.y);
   ctx.lineTo(r1.x, r1.y);
   ctx.stroke();
-  ctx.strokeStyle = '#3CFF8E';
-  ctx.lineWidth = 1.6;
+  ctx.strokeStyle = HUD_COLORS.PRIMARY;
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.moveTo(r0.x, r0.y);
   ctx.lineTo(r1.x, r1.y);
@@ -111,8 +156,8 @@ export function drawTacticalRadar(ctx, cx, cy, radius, world, rangeM = 2600) {
   // Route polyline & checkpoint ring pips
   const remaining = world.rings.filter((r) => !r.cleared);
   if (remaining.length > 1) {
-    ctx.strokeStyle = 'rgba(76, 232, 255, 0.35)';
-    ctx.lineWidth = 1.3;
+    ctx.strokeStyle = 'rgba(88, 238, 255, 0.40)';
+    ctx.lineWidth = 1.2;
     ctx.setLineDash([4, 3]);
     ctx.beginPath();
     remaining.forEach((r, idx) => {
@@ -133,120 +178,154 @@ export function drawTacticalRadar(ctx, cx, cy, radius, world, rangeM = 2600) {
     const dist = Math.hypot(dx, dy);
     const clampedX = dist > radius - 7 ? cx + (dx / dist) * (radius - 7) : p.x;
     const clampedY = dist > radius - 7 ? cy + (dy / dist) * (radius - 7) : p.y;
-    ctx.fillStyle = ring.kind === 'fuel' ? '#4CE8FF' : (isAct ? '#FFB422' : '#3CFF8E');
+    const col = ring.kind === 'fuel' ? HUD_COLORS.CYAN : (isAct ? HUD_COLORS.AMBER : HUD_COLORS.PRIMARY);
+    ctx.fillStyle = col;
     ctx.beginPath();
-    ctx.arc(clampedX, clampedY, isAct ? 4.8 : 3.0, 0, Math.PI * 2);
+    ctx.arc(clampedX, clampedY, isAct ? 4.4 : 2.8, 0, Math.PI * 2);
     ctx.fill();
     if (isAct) {
-      ctx.strokeStyle = 'rgba(255, 180, 34, 0.85)';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.4;
       ctx.beginPath();
-      ctx.arc(clampedX, clampedY, 8.2, 0, Math.PI * 2);
+      ctx.arc(clampedX, clampedY, 7.8, 0, Math.PI * 2);
       ctx.stroke();
     }
   });
 
-  // Own aircraft heading chevron at radar center
-  ctx.fillStyle = '#3CFF8E';
+  // Own aircraft symbol at scope center
+  ctx.fillStyle = HUD_COLORS.PRIMARY;
   ctx.beginPath();
   ctx.moveTo(cx, cy - 8);
-  ctx.lineTo(cx + 6, cy + 6);
-  ctx.lineTo(cx, cy + 2.5);
-  ctx.lineTo(cx - 6, cy + 6);
+  ctx.lineTo(cx + 5.5, cy + 5.5);
+  ctx.lineTo(cx, cy + 2.2);
+  ctx.lineTo(cx - 5.5, cy + 5.5);
   ctx.closePath();
   ctx.fill();
 
-  // North cardinal tick on radar bezel
+  // North cardinal indicator
   const northX = cx + Math.sin(-hdgRad) * (radius - 10);
   const northY = cy - Math.cos(-hdgRad) * (radius - 10);
-  ctx.fillStyle = '#4CE8FF';
-  ctx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = HUD_COLORS.CYAN;
+  ctx.font = `800 9px ${mono}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText('N', northX, northY);
 
+  // Subtle top glass sheen reflection across radar scope
+  const glint = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius * 0.4, cy + radius * 0.2);
+  glint.addColorStop(0, 'rgba(180, 230, 255, 0.14)');
+  glint.addColorStop(0.45, 'rgba(180, 230, 255, 0.02)');
+  glint.addColorStop(1, 'rgba(180, 230, 255, 0.0)');
+  ctx.fillStyle = glint;
+  ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
+
   ctx.restore();
 
-  // Radar outer chrome bezel
-  ctx.strokeStyle = 'rgba(76, 232, 255, 0.55)';
-  ctx.lineWidth = 2;
+  // Crisp metallic compass bezel ring & degree notches
+  ctx.save();
+  ctx.strokeStyle = 'rgba(110, 230, 255, 0.52)';
+  ctx.lineWidth = 1.8;
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
   ctx.stroke();
 
-  ctx.fillStyle = 'rgba(76, 232, 255, 0.85)';
-  ctx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText('RADAR · RWY 09', cx, cy + radius + 13);
+  ctx.strokeStyle = 'rgba(75, 255, 155, 0.48)';
+  ctx.lineWidth = 1.2;
+  for (let deg = 0; deg < 360; deg += 30) {
+    const a = degToRad(deg) - hdgRad;
+    const len = deg % 90 === 0 ? 5.5 : 3.2;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.sin(a) * radius, cy - Math.cos(a) * radius);
+    ctx.lineTo(cx + Math.sin(a) * (radius - len), cy - Math.cos(a) * (radius - len));
+    ctx.stroke();
+  }
+
+  if (showLabel) {
+    setHudGlow(ctx, 4);
+    ctx.fillStyle = 'rgba(165, 240, 255, 0.90)';
+    ctx.font = `700 10px ${mono}`;
+    ctx.textAlign = 'center';
+    ctx.fillText('TAC-MAP · RWY 09', cx, cy + radius + 14);
+  }
+  ctx.restore();
 }
 
-// Render rain streaks in Nordic storm weather
+// Render sleek angled rain streaks during Nordic squall weather
 export function drawWeatherOverlay(ctx, width, height, world) {
   const intensity = world.weather.rainIntensity;
   if (intensity <= 0.01) return;
 
   ctx.save();
-  ctx.strokeStyle = `rgba(200, 224, 245, ${0.24 * intensity})`;
-  ctx.lineWidth = 1.15;
-  const count = Math.floor(85 * intensity);
+  ctx.strokeStyle = `rgba(210, 232, 252, ${0.24 * intensity})`;
+  ctx.lineWidth = 1.1;
+  const count = Math.floor(90 * intensity);
   const t = world.time;
   ctx.beginPath();
   for (let i = 0; i < count; i++) {
     const seed = i * 197.31;
-    const x = ((seed * 37.1 + t * 520) % (width + 140)) - 70;
-    const y = ((seed * 91.7 + t * 1180) % (height + 120)) - 60;
+    const x = ((seed * 37.1 + t * 540) % (width + 140)) - 70;
+    const y = ((seed * 91.7 + t * 1240) % (height + 120)) - 60;
     ctx.moveTo(x, y);
-    ctx.lineTo(x - 14, y + 36);
+    ctx.lineTo(x - 16, y + 40);
   }
   ctx.stroke();
   ctx.restore();
 }
 
+// Frameless Collimated Military Fighter HUD (Chase & Wingman modes)
+// Frees 85%+ of viewport so golden fjord cliffs, sculpted VX-9 Kestrel & dramatic skies take center stage!
 export function drawCollimatedHud(ctx, width, height, world, viewProj) {
   const craft = world.aircraft;
   const tel = craft.telemetry;
   const cx = width * 0.5;
-  const cy = height * 0.48;
+  const cy = height * 0.46;
   const mono = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
   const sans = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  const isWingman = world.cameraMode === 'wingman';
 
   drawWeatherOverlay(ctx, width, height, world);
 
   ctx.save();
+  setHudGlow(ctx, 5);
 
-  // 1. Center Collimated Pitch Ladder & Horizon Reference
-  {
+  const hudGreen = HUD_COLORS.PRIMARY;
+  const hudGreenSoft = 'rgba(75, 255, 155, 0.78)';
+  const hudCyan = HUD_COLORS.CYAN;
+  const hudAmber = HUD_COLORS.AMBER;
+
+  // 1. CENTER COLLIMATED PITCH LADDER, BORESIGHT & VELOCITY VECTOR (Skip center clutter in scenic Wingman mode!)
+  if (!isWingman) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(cx - 210, cy - 165, 420, 325);
+    ctx.rect(cx - 195, cy - 155, 390, 300);
     ctx.clip();
 
     ctx.translate(cx, cy);
     ctx.rotate(-tel.rollRad);
 
-    const pxPerDeg = 6.2;
+    const pxPerDeg = 6.0;
     const pitchOffset = tel.pitchDeg * pxPerDeg;
 
-    ctx.strokeStyle = 'rgba(60, 255, 142, 0.78)';
-    ctx.fillStyle = 'rgba(60, 255, 142, 0.92)';
-    ctx.lineWidth = 1.8;
-    ctx.font = `700 11px ${mono}`;
+    ctx.strokeStyle = hudGreenSoft;
+    ctx.fillStyle = hudGreen;
+    ctx.lineWidth = 1.65;
+    ctx.font = `700 10px ${mono}`;
 
-    // Horizon line (0 deg)
+    // Crisp segmented horizon line (0 deg)
     ctx.beginPath();
-    ctx.moveTo(-145, pitchOffset);
+    ctx.moveTo(-140, pitchOffset);
     ctx.lineTo(-34, pitchOffset);
     ctx.moveTo(34, pitchOffset);
-    ctx.lineTo(145, pitchOffset);
+    ctx.lineTo(140, pitchOffset);
     ctx.stroke();
 
-    // Pitch rungs (-30..+30 deg in 10 deg increments)
+    // Pitch rungs (-30..+30 deg)
     for (let deg = -30; deg <= 30; deg += 10) {
       if (deg === 0) continue;
       const y = pitchOffset - deg * pxPerDeg;
-      if (Math.abs(y) > 165) continue;
-      const w = 68;
-      const gap = 28;
+      if (Math.abs(y) > 155) continue;
+      const w = 64;
+      const gap = 26;
       ctx.beginPath();
       if (deg < 0) ctx.setLineDash([6, 4]);
       else ctx.setLineDash([]);
@@ -256,7 +335,6 @@ export function drawCollimatedHud(ctx, width, height, world, viewProj) {
       ctx.lineTo(w, y);
       ctx.stroke();
       ctx.setLineDash([]);
-      // End ticks pointing toward horizon
       const tick = deg > 0 ? 7 : -7;
       ctx.beginPath();
       ctx.moveTo(-w, y);
@@ -265,89 +343,110 @@ export function drawCollimatedHud(ctx, width, height, world, viewProj) {
       ctx.lineTo(w, y + tick);
       ctx.stroke();
       ctx.textAlign = 'right';
-      ctx.fillText(String(deg), -w - 6, y + 4);
+      ctx.fillText(String(Math.abs(deg)), -w - 6, y + 3.5);
       ctx.textAlign = 'left';
-      ctx.fillText(String(deg), w + 6, y + 4);
+      ctx.fillText(String(Math.abs(deg)), w + 6, y + 3.5);
     }
-
     ctx.restore();
 
     // Fixed boresight aircraft watermark (-v-)
-    ctx.strokeStyle = HUD_COLORS.PRIMARY;
-    ctx.lineWidth = 2.4;
+    ctx.strokeStyle = hudGreen;
+    ctx.lineWidth = 2.2;
     ctx.beginPath();
-    ctx.moveTo(cx - 26, cy);
-    ctx.lineTo(cx - 9, cy);
-    ctx.lineTo(cx, cy + 8);
-    ctx.lineTo(cx + 9, cy);
-    ctx.lineTo(cx + 26, cy);
+    ctx.moveTo(cx - 24, cy);
+    ctx.lineTo(cx - 8, cy);
+    ctx.lineTo(cx, cy + 7);
+    ctx.lineTo(cx + 8, cy);
+    ctx.lineTo(cx + 24, cy);
     ctx.stroke();
 
-    // Flight path velocity vector (-o-)
+    // Subtle lower bank-angle roll arc scale
+    {
+      const arcR = 132;
+      ctx.strokeStyle = 'rgba(75, 255, 155, 0.45)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(cx, cy + 16, arcR, Math.PI * 0.34, Math.PI * 0.66);
+      ctx.stroke();
+      for (const bDeg of [-30, -15, 0, 15, 30]) {
+        const a = Math.PI * 0.5 + degToRad(bDeg);
+        const len = bDeg === 0 ? 8 : 5;
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(a) * arcR, cy + 16 + Math.sin(a) * arcR);
+        ctx.lineTo(cx + Math.cos(a) * (arcR + len), cy + 16 + Math.sin(a) * (arcR + len));
+        ctx.stroke();
+      }
+      // Live bank pointer triangle
+      const bankA = Math.PI * 0.5 - clamp(tel.rollRad, -0.56, 0.56);
+      const bx = cx + Math.cos(bankA) * (arcR - 2);
+      const by = cy + 16 + Math.sin(bankA) * (arcR - 2);
+      ctx.fillStyle = hudGreen;
+      ctx.beginPath();
+      ctx.arc(bx, by, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Flight-path velocity vector (-o-)
     if (craft.speed > 10) {
-      const velAhead = vec3Add(craft.pos, vec3Scale(craft.vel, 12));
+      const velAhead = vec3Add(craft.pos, vec3Scale(craft.vel, 14));
       const pVel = projectWorldPoint(velAhead, viewProj, width, height);
       if (pVel.visible) {
-        const vx = clamp(pVel.x, cx - 180, cx + 180);
-        const vy = clamp(pVel.y, cy - 130, cy + 130);
-        ctx.strokeStyle = HUD_COLORS.CYAN;
+        const vx = clamp(pVel.x, cx - 175, cx + 175);
+        const vy = clamp(pVel.y, cy - 125, cy + 125);
+        ctx.strokeStyle = hudCyan;
         ctx.lineWidth = 2.0;
         ctx.beginPath();
-        ctx.arc(vx, vy, 7.5, 0, Math.PI * 2);
-        ctx.moveTo(vx - 18, vy);
-        ctx.lineTo(vx - 7.5, vy);
-        ctx.moveTo(vx + 7.5, vy);
-        ctx.lineTo(vx + 18, vy);
-        ctx.moveTo(vx, vy - 7.5);
-        ctx.lineTo(vx, vy - 15);
+        ctx.arc(vx, vy, 7, 0, Math.PI * 2);
+        ctx.moveTo(vx - 17, vy);
+        ctx.lineTo(vx - 7, vy);
+        ctx.moveTo(vx + 7, vy);
+        ctx.lineTo(vx + 17, vy);
+        ctx.moveTo(vx, vy - 7);
+        ctx.lineTo(vx, vy - 14);
         ctx.stroke();
       }
     }
   }
 
-  // 2. 3D Projected Target Ring Designator Diamond & Runway 09 Approach Marker
+  // 2. 3D PROJECTED TARGET GATE DESIGNATOR DIAMOND (Crisp frameless HUD marker!)
   {
     const activeRing = world.rings[world.activeRingIndex];
     if (activeRing && !activeRing.cleared) {
       const p = projectWorldPoint(activeRing, viewProj, width, height);
       const distM = vec3Dist(craft.pos, activeRing);
       const distLabel = distM > 1000 ? `${(distM / 1000).toFixed(1)} KM` : `${Math.round(distM)} M`;
-      const ringCol = activeRing.kind === 'fuel' ? HUD_COLORS.CYAN : HUD_COLORS.AMBER;
+      const ringCol = activeRing.kind === 'fuel' ? hudCyan : hudAmber;
 
       if (p.visible) {
         const tx = p.x;
         const ty = p.y;
         ctx.strokeStyle = ringCol;
-        ctx.lineWidth = 2.4;
+        ctx.lineWidth = 2.2;
         ctx.beginPath();
-        ctx.moveTo(tx, ty - 16);
-        ctx.lineTo(tx + 16, ty);
-        ctx.lineTo(tx, ty + 16);
-        ctx.lineTo(tx - 16, ty);
+        ctx.moveTo(tx, ty - 14);
+        ctx.lineTo(tx + 14, ty);
+        ctx.lineTo(tx, ty + 14);
+        ctx.lineTo(tx - 14, ty);
         ctx.closePath();
         ctx.stroke();
 
-        ctx.fillStyle = 'rgba(8, 16, 26, 0.78)';
-        roundRectPath(ctx, tx - 40, ty + 20, 80, 20, 4);
-        ctx.fill();
         ctx.fillStyle = ringCol;
-        ctx.font = `700 11px ${mono}`;
+        ctx.font = `800 11px ${mono}`;
         ctx.textAlign = 'center';
-        ctx.fillText(`GATE ${distLabel}`, tx, ty + 34);
+        ctx.fillText(activeRing.kind === 'fuel' ? `FUEL ${distLabel}` : `GATE ${distLabel}`, tx, ty + 28);
       } else {
-        // Offscreen edge directional arrow
         const angle = Math.atan2(p.y - cy, p.x - cx) + (p.behind ? Math.PI : 0);
-        const ax = cx + Math.cos(angle) * 210;
-        const ay = cy + Math.sin(angle) * 140;
+        const ax = cx + Math.cos(angle) * 200;
+        const ay = cy + Math.sin(angle) * 135;
         ctx.save();
         ctx.translate(ax, ay);
         ctx.rotate(angle);
         ctx.fillStyle = ringCol;
         ctx.beginPath();
-        ctx.moveTo(12, 0);
-        ctx.lineTo(-8, -8);
-        ctx.lineTo(-4, 0);
-        ctx.lineTo(-8, 8);
+        ctx.moveTo(11, 0);
+        ctx.lineTo(-7, -7);
+        ctx.lineTo(-3, 0);
+        ctx.lineTo(-7, 7);
         ctx.closePath();
         ctx.fill();
         ctx.restore();
@@ -355,432 +454,458 @@ export function drawCollimatedHud(ctx, width, height, world, viewProj) {
     }
   }
 
-  // 3. Active ILS Localizer & Glideslope Crosshairs when approaching Runway 09
+  // 3. COLLIMATED ILS LOCALIZER & GLIDESLOPE SCALES (Frameless aviation reticle, never blocking aircraft!)
   const ils = world.ils;
-  if (ils && ils.inApproachCone && (craft.gearDeployed || world.mission.id === 'ils' || world.activeRingIndex >= world.rings.length)) {
-    const bw = 186;
+  if (!isWingman && ils && ils.inApproachCone && (craft.gearDeployed || world.mission.id === 'ils' || world.activeRingIndex >= world.rings.length)) {
+    const bw = 176;
     const ix = cx;
-    const iy = cy - 6;
-    const locY = iy + 62;
+    const iy = cy - 4;
+    const locY = iy + 54;
 
-    // Horizontal Localizer bar positioned cleanly above aircraft tail
-    ctx.strokeStyle = 'rgba(76, 232, 255, 0.78)';
-    ctx.lineWidth = 1.7;
+    // Horizontal Localizer dotted scale
+    ctx.strokeStyle = 'rgba(88, 238, 255, 0.85)';
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
     ctx.moveTo(ix - bw * 0.5, locY);
     ctx.lineTo(ix + bw * 0.5, locY);
     ctx.stroke();
     for (let k = -2; k <= 2; k++) {
       ctx.beginPath();
-      ctx.arc(ix + k * 34, locY, k === 0 ? 3.5 : 2.2, 0, Math.PI * 2);
+      ctx.arc(ix + k * 34, locY, k === 0 ? 3.4 : 2.1, 0, Math.PI * 2);
       ctx.stroke();
     }
-    // Localizer diamond
     const locX = ix + ils.locDev * 68;
-    ctx.fillStyle = Math.abs(ils.locDev) < 0.25 ? HUD_COLORS.PRIMARY : HUD_COLORS.AMBER;
+    ctx.fillStyle = Math.abs(ils.locDev) < 0.25 ? hudGreen : hudAmber;
     ctx.beginPath();
-    ctx.moveTo(locX, locY - 8);
-    ctx.lineTo(locX + 7, locY);
-    ctx.lineTo(locX, locY + 8);
-    ctx.lineTo(locX - 7, locY);
+    ctx.moveTo(locX, locY - 7.5);
+    ctx.lineTo(locX + 6.5, locY);
+    ctx.lineTo(locX, locY + 7.5);
+    ctx.lineTo(locX - 6.5, locY);
     ctx.closePath();
     ctx.fill();
 
-    // Vertical Glideslope bar to the right of boresight
-    const gx = ix + bw * 0.68;
+    // Vertical Glideslope dotted scale to right of center
+    const gx = ix + bw * 0.66;
+    ctx.strokeStyle = 'rgba(88, 238, 255, 0.85)';
     ctx.beginPath();
-    ctx.moveTo(gx, iy - 66);
-    ctx.lineTo(gx, iy + 66);
+    ctx.moveTo(gx, iy - 62);
+    ctx.lineTo(gx, iy + 62);
     ctx.stroke();
     for (let k = -2; k <= 2; k++) {
       ctx.beginPath();
-      ctx.arc(gx, iy + k * 27, k === 0 ? 3.5 : 2.2, 0, Math.PI * 2);
+      ctx.arc(gx, iy + k * 25, k === 0 ? 3.4 : 2.1, 0, Math.PI * 2);
       ctx.stroke();
     }
-    const gsY = iy - ils.gsDev * 54;
-    ctx.fillStyle = Math.abs(ils.gsDev) < 0.28 ? HUD_COLORS.PRIMARY : HUD_COLORS.AMBER;
+    const gsY = iy - ils.gsDev * 50;
+    ctx.fillStyle = Math.abs(ils.gsDev) < 0.28 ? hudGreen : hudAmber;
     ctx.beginPath();
-    ctx.moveTo(gx - 8, gsY);
-    ctx.lineTo(gx, gsY - 7);
-    ctx.lineTo(gx + 8, gsY);
-    ctx.lineTo(gx, gsY + 7);
+    ctx.moveTo(gx - 7.5, gsY);
+    ctx.lineTo(gx, gsY - 6.5);
+    ctx.lineTo(gx + 7.5, gsY);
+    ctx.lineTo(gx, gsY + 6.5);
     ctx.closePath();
     ctx.fill();
 
-    // ILS readout badge tucked neatly above the boresight area or below localizer without touching jet
-    const pillW = 224;
-    ctx.fillStyle = 'rgba(8, 18, 30, 0.88)';
-    roundRectPath(ctx, ix - pillW * 0.5, locY + 12, pillW, 24, 5);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(76, 232, 255, 0.65)';
-    ctx.lineWidth = 1.3;
-    ctx.stroke();
-    ctx.fillStyle = HUD_COLORS.CYAN;
-    ctx.font = `700 11px ${mono}`;
+    // Clean frameless ILS telemetry line tucked cleanly ABOVE boresight (leaves aircraft tail 100% unobstructed!)
+    ctx.fillStyle = hudCyan;
+    ctx.font = `800 11px ${mono}`;
     ctx.textAlign = 'center';
-    ctx.fillText(`ILS RWY 09 · ${ils.distNm.toFixed(1)} NM · GS ${ils.actualAngleDeg.toFixed(1)}°`, ix, locY + 28);
+    ctx.fillText(`ILS RWY 09 · ${ils.distNm.toFixed(1)} NM · GS ${ils.actualAngleDeg.toFixed(1)}°`, ix, iy - 82);
   }
 
-  // 4. TOP HEADING COMPASS TAPE (Razor-sharp even when downscaled on contact sheet!)
+  // 4. TOP FRAMELESS OPEN-SKY HEADING TAPE (True Fighter Jet Collimated Style!)
   {
-    const tapeW = 376;
-    const tapeH = 44;
-    const tx = cx - tapeW * 0.5;
-    const ty = 14;
+    const tapeW = 350;
+    const baseY = 36;
 
-    ctx.fillStyle = 'rgba(7, 15, 25, 0.84)';
-    roundRectPath(ctx, tx, ty, tapeW, tapeH, 8);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(60, 255, 142, 0.55)';
+    // Horizontal scale rail
+    ctx.strokeStyle = 'rgba(75, 255, 155, 0.75)';
     ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(cx - tapeW * 0.5, baseY);
+    ctx.lineTo(cx + tapeW * 0.5, baseY);
     ctx.stroke();
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(tx + 16, ty, tapeW - 32, tapeH);
+    ctx.rect(cx - tapeW * 0.5, 4, tapeW, 44);
     ctx.clip();
 
     const hdg = tel.headingDeg;
-    const pxPerDegH = 4.6;
-    const startDeg = Math.floor((hdg - 32) / 5) * 5;
+    const pxPerDegH = 4.5;
+    const startDeg = Math.floor((hdg - 38) / 5) * 5;
     const cardinals = { 0: 'N', 45: 'NE', 90: 'E', 135: 'SE', 180: 'S', 225: 'SW', 270: 'W', 315: 'NW' };
 
-    ctx.strokeStyle = 'rgba(60, 255, 142, 0.72)';
-    ctx.fillStyle = 'rgba(220, 255, 235, 0.92)';
-    ctx.font = `700 12px ${mono}`;
+    ctx.strokeStyle = 'rgba(75, 255, 155, 0.85)';
+    ctx.fillStyle = '#E8FFF2';
+    ctx.font = `800 12px ${mono}`;
     ctx.textAlign = 'center';
 
-    for (let d = startDeg; d <= hdg + 32; d += 5) {
+    for (let d = startDeg; d <= hdg + 38; d += 5) {
       const x = cx + (d - hdg) * pxPerDegH;
       const wd = wrapAngleDeg(d);
       const isMajor = wd % 15 === 0;
       ctx.beginPath();
-      ctx.moveTo(x, ty + tapeH);
-      ctx.lineTo(x, ty + tapeH - (isMajor ? 11 : 6));
+      ctx.moveTo(x, baseY);
+      ctx.lineTo(x, baseY - (isMajor ? 10 : 5));
       ctx.stroke();
-      if (isMajor && Math.abs(x - cx) < tapeW * 0.5 - 28) {
+      if (isMajor && Math.abs(x - cx) < tapeW * 0.5 - 16) {
         const lbl = cardinals[wd] ?? String(Math.round(wd)).padStart(3, '0');
-        ctx.fillText(lbl, x, ty + 22);
+        ctx.fillText(lbl, x, baseY - 14);
+      }
+    }
+
+    // Active gate or runway bearing caret bug on heading tape
+    const targetPt = (world.rings[world.activeRingIndex] && !world.rings[world.activeRingIndex].cleared)
+      ? world.rings[world.activeRingIndex]
+      : { x: RUNWAY.TOUCHDOWN_X, z: RUNWAY.CENTER_Z };
+    const tgtBrg = wrapAngleDeg(radToDeg(Math.atan2(targetPt.x - craft.pos.x, -(targetPt.z - craft.pos.z))));
+    let diff = tgtBrg - hdg;
+    if (diff > 180) diff -= 360;
+    if (diff < -180) diff += 360;
+    const bugX = cx + clamp(diff, -36, 36) * pxPerDegH;
+    ctx.fillStyle = hudAmber;
+    ctx.beginPath();
+    ctx.moveTo(bugX, baseY + 1);
+    ctx.lineTo(bugX - 5, baseY + 8);
+    ctx.lineTo(bugX + 5, baseY + 8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // Open-bottom center heading caret & crisp digital HDG box
+    ctx.fillStyle = hudGreen;
+    ctx.beginPath();
+    ctx.moveTo(cx, baseY + 1);
+    ctx.lineTo(cx - 5, baseY + 8);
+    ctx.lineTo(cx + 5, baseY + 8);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(4, 14, 20, 0.44)';
+    roundRectPath(ctx, cx - 38, baseY + 10, 76, 23, 4);
+    ctx.fill();
+    ctx.strokeStyle = hudGreen;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    ctx.fillStyle = hudGreen;
+    ctx.font = `800 15px ${mono}`;
+    ctx.textAlign = 'center';
+    ctx.fillText(`${String(Math.round(hdg)).padStart(3, '0')}°`, cx, baseY + 27);
+  }
+
+  // 5. LEFT FRAMELESS OPEN-SKY AIRSPEED LADDER (F/A-18 / Gripen Fighter Style!)
+  {
+    const railX = isWingman ? 106 : Math.max(115, cx - 295);
+    const tapeH = 210;
+    const topY = cy - tapeH * 0.5;
+    const kt = Math.round(craft.airspeedKt);
+    const col = craft.stall ? HUD_COLORS.DANGER : (craft.overspeed ? hudAmber : hudGreen);
+
+    // Vertical tick rail
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    ctx.moveTo(railX, topY);
+    ctx.lineTo(railX, topY + tapeH);
+    ctx.moveTo(railX - 10, topY);
+    ctx.lineTo(railX, topY);
+    ctx.moveTo(railX - 10, topY + tapeH);
+    ctx.lineTo(railX, topY + tapeH);
+    ctx.stroke();
+
+    // Rolling airspeed graduations
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(railX - 88, topY + 6, 88, tapeH - 12);
+    ctx.clip();
+    const startKt = Math.floor((kt - 80) / 10) * 10;
+    ctx.strokeStyle = 'rgba(75, 255, 155, 0.78)';
+    ctx.fillStyle = '#E8FFF2';
+    ctx.font = `700 11px ${mono}`;
+    ctx.textAlign = 'right';
+    for (let k = startKt; k <= kt + 80; k += 10) {
+      if (k < 0) continue;
+      const ty = cy - (k - kt) * 1.45;
+      if (Math.abs(ty - cy) < 18) continue; // Keep center readout box crystal clean
+      const isMajor = k % 20 === 0;
+      ctx.beginPath();
+      ctx.moveTo(railX, ty);
+      ctx.lineTo(railX - (isMajor ? 10 : 5), ty);
+      ctx.stroke();
+      if (isMajor) {
+        ctx.fillText(String(k), railX - 14, ty + 4);
       }
     }
     ctx.restore();
 
-    // Bold center HDG readout box
-    const boxW = 92;
-    ctx.fillStyle = 'rgba(5, 13, 22, 0.95)';
-    roundRectPath(ctx, cx - boxW * 0.5, ty + tapeH - 4, boxW, 28, 6);
-    ctx.fill();
-    ctx.strokeStyle = HUD_COLORS.PRIMARY;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.fillStyle = HUD_COLORS.PRIMARY;
-    ctx.font = `800 17px ${mono}`;
-    ctx.textAlign = 'center';
-    ctx.fillText(`HDG ${String(Math.round(hdg)).padStart(3, '0')}°`, cx, ty + tapeH + 16);
-  }
-
-  // 5. LEFT AIRSPEED TAPE & BOLD SPD READOUT POD
-  {
-    const x = 32;
-    const y = cy - 115;
-    const w = 132;
-    const h = 228;
-
-    ctx.fillStyle = 'rgba(7, 15, 25, 0.80)';
-    roundRectPath(ctx, x, y, w, h, 10);
-    ctx.fill();
-    ctx.strokeStyle = craft.stall ? HUD_COLORS.DANGER : (craft.overspeed ? HUD_COLORS.AMBER : 'rgba(60, 255, 142, 0.48)');
-    ctx.lineWidth = 1.8;
-    ctx.stroke();
-
-    // Header label
-    ctx.fillStyle = 'rgba(76, 232, 255, 0.90)';
-    ctx.font = `700 11px ${mono}`;
-    ctx.textAlign = 'left';
-    ctx.fillText('AIRSPEED', x + 12, y + 20);
-
-    // Big crisp digital knots readout
-    const kt = Math.round(craft.airspeedKt);
-    ctx.fillStyle = craft.stall ? HUD_COLORS.DANGER : HUD_COLORS.PRIMARY;
-    ctx.font = `800 32px ${mono}`;
-    ctx.fillText(String(kt).padStart(3, '0'), x + 12, y + 58);
-    ctx.font = `700 13px ${mono}`;
-    ctx.fillStyle = 'rgba(220, 245, 255, 0.85)';
-    ctx.fillText('KT', x + 84, y + 58);
-
-    // Mach & Throttle bar inside SPD pod
-    const mach = (craft.speed / 340).toFixed(2);
-    ctx.fillStyle = 'rgba(180, 220, 240, 0.82)';
-    ctx.font = `700 12px ${mono}`;
-    ctx.fillText(`M ${mach} · THR ${Math.round(craft.throttle * 100)}%`, x + 12, y + 80);
-
-    // Vertical thrust gauge bar
-    const barX = x + 14;
-    const barY = y + 96;
-    const barW = 14;
-    const barH = 114;
-    ctx.fillStyle = 'rgba(255,255,255,0.10)';
-    ctx.fillRect(barX, barY, barW, barH);
-    const fillH = clamp(craft.throttle, 0, 1) * barH;
-    ctx.fillStyle = craft.afterburner ? HUD_COLORS.AMBER : HUD_COLORS.PRIMARY;
-    ctx.fillRect(barX, barY + barH - fillH, barW, fillH);
-
-    // Rolling airspeed tick scale beside thrust bar
-    ctx.save();
+    // Pointed fighter chevron airspeed readout box
+    ctx.fillStyle = 'rgba(4, 14, 20, 0.48)';
     ctx.beginPath();
-    ctx.rect(x + 36, barY, w - 44, barH);
-    ctx.clip();
-    const scaleMidY = barY + barH * 0.5;
-    const startKt = Math.floor((kt - 65) / 20) * 20;
-    ctx.strokeStyle = 'rgba(60, 255, 142, 0.65)';
-    ctx.fillStyle = 'rgba(215, 255, 232, 0.88)';
-    ctx.font = `700 11px ${mono}`;
+    ctx.moveTo(railX - 4, cy);
+    ctx.lineTo(railX - 14, cy - 14);
+    ctx.lineTo(railX - 84, cy - 14);
+    ctx.lineTo(railX - 84, cy + 14);
+    ctx.lineTo(railX - 14, cy + 14);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.9;
+    ctx.stroke();
+
+    ctx.fillStyle = col;
+    ctx.font = `800 18px ${mono}`;
     ctx.textAlign = 'right';
-    for (let k = startKt; k <= kt + 65; k += 20) {
-      if (k < 0) continue;
-      const ty = scaleMidY - (k - kt) * 1.15;
-      ctx.beginPath();
-      ctx.moveTo(x + 40, ty);
-      ctx.lineTo(x + 54, ty);
-      ctx.stroke();
-      ctx.fillText(String(k), x + w - 12, ty + 4);
-    }
-    ctx.restore();
+    ctx.fillText(String(kt).padStart(3, '0'), railX - 19, cy + 6);
 
-    // Pointer triangle on airspeed scale
-    ctx.fillStyle = HUD_COLORS.AMBER;
-    ctx.beginPath();
-    ctx.moveTo(x + 36, scaleMidY);
-    ctx.lineTo(x + 44, scaleMidY - 5);
-    ctx.lineTo(x + 44, scaleMidY + 5);
-    ctx.closePath();
-    ctx.fill();
+    // Compact aviation speed captions right above & below ladder (KT, Mach, THR%)
+    ctx.fillStyle = 'rgba(180, 245, 255, 0.92)';
+    ctx.font = `800 10px ${mono}`;
+    ctx.textAlign = 'right';
+    ctx.fillText('IAS KT', railX, topY - 11);
+
+    const mach = (craft.speed / 340).toFixed(2);
+    ctx.fillStyle = craft.afterburner ? hudAmber : hudGreen;
+    ctx.font = `800 11px ${mono}`;
+    ctx.fillText(`M ${mach}`, railX, topY + tapeH + 16);
+    ctx.fillStyle = craft.afterburner ? hudAmber : 'rgba(205, 245, 230, 0.92)';
+    ctx.fillText(craft.afterburner ? 'A/B MAX' : `THR ${Math.round(craft.throttle * 100)}%`, railX, topY + tapeH + 31);
   }
 
-  // 6. RIGHT ALTITUDE TAPE & BOLD ALT / VSI READOUT POD
+  // 6. RIGHT FRAMELESS OPEN-SKY ALTITUDE LADDER (Mirrors Airspeed Tape!)
   {
-    const w = 138;
-    const h = 228;
-    const x = width - w - 32;
-    const y = cy - 115;
+    const railX = isWingman ? (width - 106) : Math.min(width - 115, cx + 295);
+    const tapeH = 210;
+    const topY = cy - tapeH * 0.5;
+    const altFt = Math.round(craft.altitudeFt);
+    const lowWarn = craft.aglM < 32 && !craft.onGround && !craft.gearDeployed;
+    const col = lowWarn ? hudAmber : hudGreen;
 
-    ctx.fillStyle = 'rgba(7, 15, 25, 0.80)';
-    roundRectPath(ctx, x, y, w, h, 10);
-    ctx.fill();
-    ctx.strokeStyle = craft.aglM < 35 && !craft.onGround && !craft.gearDeployed ? HUD_COLORS.AMBER : 'rgba(60, 255, 142, 0.48)';
-    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    ctx.moveTo(railX, topY);
+    ctx.lineTo(railX, topY + tapeH);
+    ctx.moveTo(railX, topY);
+    ctx.lineTo(railX + 10, topY);
+    ctx.moveTo(railX, topY + tapeH);
+    ctx.lineTo(railX + 10, topY + tapeH);
     ctx.stroke();
 
-    ctx.fillStyle = 'rgba(76, 232, 255, 0.90)';
-    ctx.font = `700 11px ${mono}`;
-    ctx.textAlign = 'left';
-    ctx.fillText('ALTITUDE', x + 12, y + 20);
-
-    const altFt = Math.round(craft.altitudeFt);
-    ctx.fillStyle = HUD_COLORS.PRIMARY;
-    ctx.font = `800 30px ${mono}`;
-    ctx.fillText(String(altFt).padStart(4, ' '), x + 10, y + 58);
-    ctx.font = `700 13px ${mono}`;
-    ctx.fillStyle = 'rgba(220, 245, 255, 0.85)';
-    ctx.fillText('FT', x + 98, y + 58);
-
-    // AGL & Vertical Speed readout
-    const vsiSign = craft.vsiFpm >= 0 ? '+' : '';
-    const vsiVal = Math.round(craft.vsiFpm / 10) * 10;
-    ctx.fillStyle = Math.abs(vsiVal) > 1500 ? HUD_COLORS.AMBER : 'rgba(180, 220, 240, 0.84)';
-    ctx.font = `700 11px ${mono}`;
-    ctx.fillText(`AGL ${Math.round(craft.aglM * WORLD.M_TO_FT)} · VS ${vsiSign}${vsiVal}`, x + 12, y + 80);
-
-    // Rolling altitude ticks
-    const barY = y + 98;
-    const barH = 112;
-    const scaleMidY = barY + barH * 0.5;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(x + 10, barY, w - 20, barH);
+    ctx.rect(railX, topY + 6, 92, tapeH - 12);
     ctx.clip();
-    const startAlt = Math.floor((altFt - 280) / 100) * 100;
-    ctx.strokeStyle = 'rgba(60, 255, 142, 0.65)';
-    ctx.fillStyle = 'rgba(215, 255, 232, 0.88)';
+    const startAlt = Math.floor((altFt - 320) / 50) * 50;
+    ctx.strokeStyle = 'rgba(75, 255, 155, 0.78)';
+    ctx.fillStyle = '#E8FFF2';
     ctx.font = `700 11px ${mono}`;
     ctx.textAlign = 'left';
-    for (let a = startAlt; a <= altFt + 280; a += 100) {
+    for (let a = startAlt; a <= altFt + 320; a += 50) {
       if (a < 0) continue;
-      const ty = scaleMidY - (a - altFt) * 0.26;
-      if (ty < barY + 9 || ty > barY + barH - 7) continue;
+      const ty = cy - (a - altFt) * 0.34;
+      if (Math.abs(ty - cy) < 18) continue;
+      const isMajor = a % 100 === 0;
       ctx.beginPath();
-      ctx.moveTo(x + w - 26, ty);
-      ctx.lineTo(x + w - 12, ty);
+      ctx.moveTo(railX, ty);
+      ctx.lineTo(railX + (isMajor ? 10 : 5), ty);
       ctx.stroke();
-      ctx.fillText(String(a), x + 16, ty + 4);
+      if (isMajor) {
+        ctx.fillText(String(a), railX + 14, ty + 4);
+      }
     }
     ctx.restore();
 
-    ctx.fillStyle = HUD_COLORS.AMBER;
+    // Pointed fighter chevron altitude box
+    ctx.fillStyle = 'rgba(4, 14, 20, 0.48)';
     ctx.beginPath();
-    ctx.moveTo(x + w - 12, scaleMidY);
-    ctx.lineTo(x + w - 20, scaleMidY - 5);
-    ctx.lineTo(x + w - 20, scaleMidY + 5);
+    ctx.moveTo(railX + 4, cy);
+    ctx.lineTo(railX + 14, cy - 14);
+    ctx.lineTo(railX + 90, cy - 14);
+    ctx.lineTo(railX + 90, cy + 14);
+    ctx.lineTo(railX + 14, cy + 14);
     ctx.closePath();
     ctx.fill();
-  }
-
-  // 7. TOP-LEFT MISSION OBJECTIVE PILL
-  {
-    const x = 28;
-    const y = 16;
-    const w = 326;
-    const h = 58;
-    ctx.fillStyle = 'rgba(7, 15, 25, 0.82)';
-    roundRectPath(ctx, x, y, w, h, 9);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(76, 232, 255, 0.45)';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.9;
     ctx.stroke();
 
-    ctx.fillStyle = HUD_COLORS.AMBER;
+    ctx.fillStyle = col;
+    ctx.font = `800 18px ${mono}`;
+    ctx.textAlign = 'left';
+    ctx.fillText(String(altFt), railX + 19, cy + 6);
+
+    ctx.fillStyle = 'rgba(180, 245, 255, 0.92)';
+    ctx.font = `800 10px ${mono}`;
+    ctx.fillText('ALT FT', railX, topY - 11);
+
+    const aglFt = Math.round(craft.aglM * WORLD.M_TO_FT);
+    const vsiVal = Math.round(craft.vsiFpm / 10) * 10;
+    const vsiSign = vsiVal >= 0 ? '+' : '';
+    ctx.fillStyle = hudGreen;
+    ctx.font = `800 11px ${mono}`;
+    ctx.fillText(`R ${aglFt} FT`, railX, topY + tapeH + 16);
+    ctx.fillStyle = Math.abs(vsiVal) > 1600 ? hudAmber : 'rgba(205, 245, 230, 0.90)';
+    ctx.fillText(`VS ${vsiSign}${vsiVal}`, railX, topY + tapeH + 31);
+  }
+
+  // 7. MINIMAL FRAMELESS TOP-LEFT MISSION SORTIE TELEMETRY STRIP (Zero boxy chrome, crisp legibility scrim!)
+  {
+    const x = 24;
+    const y = 20;
+    const scrimL = ctx.createLinearGradient(0, 0, 355, 0);
+    scrimL.addColorStop(0, 'rgba(4, 10, 18, 0.52)');
+    scrimL.addColorStop(0.75, 'rgba(4, 10, 18, 0.22)');
+    scrimL.addColorStop(1, 'rgba(4, 10, 18, 0.0)');
+    ctx.fillStyle = scrimL;
+    ctx.fillRect(0, 0, 355, 68);
+
+    ctx.fillStyle = hudAmber;
+    ctx.fillRect(x, y, 3, 34);
+
+    ctx.fillStyle = hudAmber;
     ctx.font = `800 11px ${mono}`;
     ctx.textAlign = 'left';
-    ctx.fillText(`${world.mission.code} · ${world.mission.name}`, x + 14, y + 21);
+    ctx.fillText(`${world.mission.code} · ${world.mission.name}`, x + 11, y + 12);
 
     const total = world.rings.length;
     const cleared = world.ringsCleared;
     let objText = '';
     if (world.mission.objectiveType === 'land') {
-      objText = `LAND RWY 09 · GEAR ${craft.gearDeployed ? 'DN' : 'UP'} · ${formatMissionTime(world.missionTime)}`;
+      objText = `ILS RWY 09 · GEAR ${craft.gearDeployed ? 'DN' : 'UP'} · ${formatMissionTime(world.missionTime)}`;
     } else if (cleared < total) {
-      objText = `GATES ${cleared}/${total} · TIME ${formatMissionTime(world.missionTime)} · PTS ${world.score}`;
+      objText = `GATES ${cleared}/${total} · ${formatMissionTime(world.missionTime)} · ${world.score} PTS`;
     } else {
       objText = `ALL GATES CLEAR · LAND RWY 09 · ${formatMissionTime(world.missionTime)}`;
     }
-    ctx.fillStyle = HUD_COLORS.WHITE;
-    ctx.font = `700 13px ${mono}`;
-    ctx.fillText(objText, x + 14, y + 43);
+    ctx.fillStyle = '#F2FAFF';
+    ctx.font = `700 12px ${mono}`;
+    ctx.fillText(objText, x + 11, y + 30);
   }
 
-  // 8. TOP-RIGHT CAMERA / WEATHER / CONTROL CHIP
+  // 8. MINIMAL FRAMELESS TOP-RIGHT CAMERA & WEATHER TAG
   {
-    const w = 296;
-    const h = 46;
-    const x = width - w - 26;
-    const y = 16;
-    ctx.fillStyle = 'rgba(7, 15, 25, 0.84)';
-    roundRectPath(ctx, x, y, w, h, 9);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(60, 255, 142, 0.42)';
-    ctx.lineWidth = 1.3;
-    ctx.stroke();
+    const x = width - 24;
+    const y = 20;
+    const scrimR = ctx.createLinearGradient(width, 0, width - 350, 0);
+    scrimR.addColorStop(0, 'rgba(4, 10, 18, 0.52)');
+    scrimR.addColorStop(0.75, 'rgba(4, 10, 18, 0.22)');
+    scrimR.addColorStop(1, 'rgba(4, 10, 18, 0.0)');
+    ctx.fillStyle = scrimR;
+    ctx.fillRect(width - 350, 0, 350, 64);
 
-    ctx.fillStyle = HUD_COLORS.CYAN;
-    ctx.font = `700 11px ${mono}`;
+    ctx.fillStyle = hudCyan;
+    ctx.fillRect(x - 3, y, 3, 30);
+
+    ctx.fillStyle = hudCyan;
+    ctx.font = `800 11px ${mono}`;
     ctx.textAlign = 'right';
-    ctx.fillText(`CAM: ${world.cameraMode.toUpperCase()} [C] · ${world.weather.label}`, x + w - 14, y + 19);
-    ctx.fillStyle = 'rgba(215, 235, 250, 0.82)';
+    ctx.fillText(`${world.cameraMode.toUpperCase()} [C] · ${world.weather.label}`, x - 11, y + 12);
+    ctx.fillStyle = 'rgba(225, 242, 255, 0.86)';
     ctx.font = `600 10px ${mono}`;
-    ctx.fillText(`[V] FLAPS  [G] GEAR  [Y] YOKE  [P] MENU`, x + w - 14, y + 36);
+    ctx.fillText('[V] FLAPS · [G] GEAR · [B] BRK · [P] MENU', x - 11, y + 27);
   }
 
-  // 9. BOTTOM-LEFT AIRCRAFT SYSTEMS & FUEL / HULL INSTRUMENT POD
+  // 9. MINIMAL TRANSLUCENT BOTTOM-LEFT AIRCRAFT SYSTEMS STRIP (Compact, crisp, non-intrusive!)
   {
-    const x = 28;
-    const w = 350;
-    const h = 88;
-    const y = height - h - 22;
+    const x = 24;
+    const y = height - 64;
 
-    ctx.fillStyle = 'rgba(7, 15, 25, 0.84)';
-    roundRectPath(ctx, x, y, w, h, 10);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(60, 255, 142, 0.42)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+    const fuelCol = craft.fuel < 22 ? HUD_COLORS.DANGER : (craft.fuel < 45 ? hudAmber : hudCyan);
+    const hullCol = craft.hull < 45 ? HUD_COLORS.DANGER : (craft.hull < 75 ? hudAmber : hudGreen);
 
-    // Fuel & Hull bars
-    const drawBar = (bx, by, bw, label, pct, color) => {
-      ctx.fillStyle = 'rgba(200, 230, 245, 0.90)';
-      ctx.font = `700 11px ${mono}`;
+    const drawSlimGauge = (bx, by, bw, lbl, pct, col) => {
+      ctx.fillStyle = 'rgba(220, 242, 255, 0.90)';
+      ctx.font = `800 10px ${mono}`;
       ctx.textAlign = 'left';
-      ctx.fillText(`${label}`, bx, by);
+      ctx.fillText(lbl, bx, by);
+      ctx.fillStyle = col;
       ctx.textAlign = 'right';
-      ctx.fillStyle = color;
       ctx.fillText(`${Math.round(pct)}%`, bx + bw, by);
 
-      ctx.fillStyle = 'rgba(255,255,255,0.12)';
-      roundRectPath(ctx, bx, by + 6, bw, 9, 4);
-      ctx.fill();
-      ctx.fillStyle = color;
-      roundRectPath(ctx, bx, by + 6, bw * clamp(pct / 100, 0, 1), 9, 4);
-      ctx.fill();
+      ctx.fillStyle = 'rgba(6, 18, 28, 0.52)';
+      ctx.fillRect(bx, by + 5, bw, 5);
+      ctx.fillStyle = col;
+      ctx.fillRect(bx, by + 5, bw * clamp(pct / 100, 0, 1), 5);
     };
 
-    const fuelCol = craft.fuel < 20 ? HUD_COLORS.DANGER : (craft.fuel < 35 ? HUD_COLORS.AMBER : HUD_COLORS.CYAN);
-    const hullCol = craft.hull < 40 ? HUD_COLORS.DANGER : (craft.hull < 70 ? HUD_COLORS.AMBER : HUD_COLORS.PRIMARY);
-    drawBar(x + 14, y + 22, 148, 'FUEL', craft.fuel, fuelCol);
-    drawBar(x + 184, y + 22, 150, 'HULL', craft.hull, hullCol);
+    drawSlimGauge(x, y, 122, 'FUEL', craft.fuel, fuelCol);
+    drawSlimGauge(x + 138, y, 118, 'HULL', craft.hull, hullCol);
 
-    // Illuminated Systems Annunciator Chips
-    const chips = [
-      { label: 'A/B', on: craft.afterburner, col: HUD_COLORS.AMBER },
-      { label: 'GEAR', on: craft.gearDeployed, col: HUD_COLORS.PRIMARY },
-      { label: 'FLAPS', on: craft.flaps > 0.5, col: HUD_COLORS.CYAN },
-      { label: 'BRK', on: craft.speedbrake, col: HUD_COLORS.AMBER },
-      { label: `${craft.gLoad.toFixed(1)}G`, on: Math.abs(craft.gLoad) > 4.5, col: HUD_COLORS.AMBER, alwaysLit: true },
+    // Compact fighter annunciator tags right beneath fuel/hull
+    const tags = [
+      { label: 'A/B', on: craft.afterburner, col: hudAmber },
+      { label: 'GEAR', on: craft.gearDeployed, col: hudGreen },
+      { label: 'FLAPS', on: craft.flaps > 0.5, col: hudCyan },
+      { label: 'BRK', on: craft.speedbrake, col: hudAmber },
+      { label: `${craft.gLoad.toFixed(1)}G`, on: true, col: Math.abs(craft.gLoad) > 4.5 ? hudAmber : hudGreen },
     ];
-    let cxChip = x + 14;
-    for (const ch of chips) {
-      const cw = 58;
-      ctx.fillStyle = ch.on ? 'rgba(255, 180, 34, 0.22)' : 'rgba(255, 255, 255, 0.06)';
-      if (ch.on && ch.col === HUD_COLORS.PRIMARY) ctx.fillStyle = 'rgba(60, 255, 142, 0.22)';
-      if (ch.on && ch.col === HUD_COLORS.CYAN) ctx.fillStyle = 'rgba(76, 232, 255, 0.22)';
-      roundRectPath(ctx, cxChip, y + 50, cw, 24, 5);
-      ctx.fill();
-      ctx.strokeStyle = ch.on ? ch.col : 'rgba(180, 210, 230, 0.24)';
-      ctx.lineWidth = 1.3;
-      ctx.stroke();
-      ctx.fillStyle = ch.on || ch.alwaysLit ? ch.col : 'rgba(170, 195, 215, 0.55)';
-      ctx.font = `800 11px ${mono}`;
+    let tx = x;
+    const ty = y + 22;
+    for (const tg of tags) {
+      const tw = 48;
+      if (tg.on) {
+        ctx.fillStyle = 'rgba(6, 18, 26, 0.52)';
+        roundRectPath(ctx, tx, ty, tw, 20, 3);
+        ctx.fill();
+        ctx.strokeStyle = tg.col;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        ctx.fillStyle = tg.col;
+      } else {
+        ctx.strokeStyle = 'rgba(180, 215, 235, 0.28)';
+        ctx.lineWidth = 1.0;
+        roundRectPath(ctx, tx, ty, tw, 20, 3);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(195, 222, 240, 0.48)';
+      }
+      ctx.font = `800 10px ${mono}`;
       ctx.textAlign = 'center';
-      ctx.fillText(ch.label, cxChip + cw * 0.5, y + 66);
-      cxChip += cw + 8;
+      ctx.fillText(tg.label, tx + tw * 0.5, ty + 13.5);
+      tx += tw + 6;
     }
   }
 
-  // 10. BOTTOM-RIGHT TACTICAL FJORD MINI-RADAR
-  drawTacticalRadar(ctx, width - 92, height - 102, 66, world, 2600);
+  clearHudGlow(ctx);
 
-  // 11. WARNINGS & TOUCHDOWN BANNERS (STALL / LOW FUEL / SMOOTH LANDING)
+  // 10. BOTTOM-RIGHT CIRCULAR GLASS FJORD TOPOGRAPHIC RADAR
+  drawTacticalRadar(ctx, width - 86, height - 96, 62, world, 2600, true);
+
+  // 11. WARNINGS & TOUCHDOWN BANNERS
   let bannerText = null;
-  let bannerColor = HUD_COLORS.AMBER;
+  let bannerColor = hudAmber;
   if (craft.stall) {
-    bannerText = '⚠ STALL WARNING · PITCH DOWN / ADD THRUST';
+    bannerText = 'STALL WARNING · PITCH DOWN / ADD THRUST';
     bannerColor = HUD_COLORS.DANGER;
   } else if (craft.overspeed) {
-    bannerText = '⚠ OVERSPEED · REDUCE THROTTLE';
-    bannerColor = HUD_COLORS.AMBER;
+    bannerText = 'OVERSPEED · REDUCE THROTTLE';
+    bannerColor = hudAmber;
   } else if (craft.fuel <= 0) {
-    bannerText = '⚠ FLAMEOUT · GLIDE TO RUNWAY 09';
+    bannerText = 'FLAMEOUT · GLIDE TO RUNWAY 09';
     bannerColor = HUD_COLORS.DANGER;
   } else if (craft.fuel < 18) {
-    bannerText = '⚠ BINGO FUEL · CONSERVE AFTERBURNER';
-    bannerColor = HUD_COLORS.AMBER;
+    bannerText = 'BINGO FUEL · CONSERVE AFTERBURNER';
+    bannerColor = hudAmber;
   } else if (craft.touchdownBanner && craft.touchdownTimer > 0) {
     bannerText = craft.touchdownBanner;
-    bannerColor = HUD_COLORS.PRIMARY;
+    bannerColor = hudGreen;
   }
 
   if (bannerText) {
-    ctx.font = `800 14px ${sans}`;
-    const tw = Math.max(260, ctx.measureText(bannerText).width + 44);
+    setHudGlow(ctx, 6);
+    ctx.font = `800 13px ${sans}`;
+    const tw = Math.max(250, ctx.measureText(bannerText).width + 38);
     const bx = cx - tw * 0.5;
-    const by = 98;
-    ctx.fillStyle = 'rgba(10, 14, 22, 0.88)';
-    roundRectPath(ctx, bx, by, tw, 34, 7);
+    const by = 82;
+    ctx.fillStyle = 'rgba(8, 12, 20, 0.72)';
+    roundRectPath(ctx, bx, by, tw, 30, 5);
     ctx.fill();
     ctx.strokeStyle = bannerColor;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 1.8;
     ctx.stroke();
     ctx.fillStyle = bannerColor;
     ctx.textAlign = 'center';
-    ctx.fillText(bannerText, cx, by + 22);
+    ctx.fillText(bannerText, cx, by + 20);
   }
 
   ctx.restore();

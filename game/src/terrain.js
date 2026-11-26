@@ -1,4 +1,5 @@
-// FJORDWING — Deterministic Skjold Fjord archipelago heightfield, runway plateau, landmarks & cloud geometry.
+// FJORDWING — Deterministic Skjold Fjord archipelago heightfield, GPU heightmap/AO bake,
+// rocky island landmarks, Nordic coastal village, lighthouse beam & volumetric cloud billboard puffs.
 
 import { WORLD, RUNWAY } from './config.js';
 import { clamp, smoothstep, createRng } from './math.js';
@@ -36,20 +37,23 @@ function fbm2D(x, z, octaves = 4) {
   return v;
 }
 
-function ridgedFbm(x, z) {
+function ridgedFbm(x, z, octaves = 5) {
   let v = 0;
-  let amp = 0.55;
+  let amp = 0.54;
   let freq = 1;
-  for (let i = 0; i < 4; i++) {
-    const n = 1.0 - Math.abs(noise2D(x * freq, z * freq) * 2.0 - 1.0);
-    v += amp * n * n;
-    freq *= 2.07;
+  let weight = 1.0;
+  for (let i = 0; i < octaves; i++) {
+    let n = 1.0 - Math.abs(noise2D(x * freq, z * freq) * 2.0 - 1.0);
+    n = n * n * weight;
+    weight = clamp(n * 1.85, 0.25, 1.0);
+    v += amp * n;
+    freq *= 2.08;
     amp *= 0.48;
   }
   return v;
 }
 
-// Analytical terrain elevation query used by both mesh generation and flight collision/landing physics.
+// Analytical terrain elevation query used by mesh generation, GPU heightmap bake, and flight physics.
 export function getTerrainHeight(x, z) {
   // Sweeping main Skjold Fjord waterway curving gently East-West
   const channelCenter =
@@ -61,83 +65,91 @@ export function getTerrainHeight(x, z) {
   const effCenter = channelCenter * (1 - bayBlend * 0.85);
   const distToChannel = Math.abs(z - effCenter);
 
-  // Channel half-width: ~420m in canyon, ~680m in the Skjold Island bay
-  const channelHalfWidth = 390 + bayBlend * 300;
-  const wallRise = smoothstep(channelHalfWidth * 0.72, channelHalfWidth * 1.95, distToChannel);
+  // Channel half-width: ~395m in canyon, ~685m in the Skjold Island bay
+  const channelHalfWidth = 395 + bayBlend * 290;
+  const wallRise = smoothstep(channelHalfWidth * 0.68, channelHalfWidth * 1.88, distToChannel);
 
-  // Sculpt dramatic glacial alpine peaks along North and South fjord walls
-  const ridge = ridgedFbm(x * 0.00058 + 7.3, z * 0.00058 - 4.1);
+  // Sculpt dramatic Lofoten-style jagged glacial alpine peaks & steep granite fjord walls
+  const ridge = ridgedFbm(x * 0.00056 + 7.3, z * 0.00056 - 4.1, 5);
+  const ridgeFine = ridgedFbm(x * 0.00165 - 5.2, z * 0.00165 + 8.4, 4);
   const baseRoll = fbm2D(x * 0.00028 - 2.1, z * 0.00028 + 3.4, 4);
-  const crag = fbm2D(x * 0.0022 + 12.0, z * 0.0022 - 9.0, 3);
+  const crag = fbm2D(x * 0.0028 + 12.0, z * 0.0028 - 9.0, 3);
 
-  let h = -26 + wallRise * (290 + ridge * 540 + baseRoll * 220 + (crag - 0.5) * 48);
+  // Steeper cliff shoulders emerging from the water for authentic Norwegian fjord walls
+  const fjordWall = Math.pow(wallRise, 0.86);
+  let h = -28 + fjordWall * (300 + ridge * 580 + ridgeFine * 115 + baseRoll * 195 + (crag - 0.5) * 56);
 
-  // Iconic Jagged Eastern Lofoten Glacier Spire behind Runway 09 (sharp faceted alpine ridges!)
-  const ridgeSharp = ridgedFbm(x * 0.00145 + 3.1, z * 0.00145 - 2.7);
-  const dSpire = Math.hypot((x - 3250) * 0.78, z - 40);
-  if (dSpire < 1550) {
-    const s = 1 - smoothstep(40, 1550, dSpire);
-    const spireProfile = Math.pow(s, 1.45) * (540 + ridgeSharp * 430);
+  // Iconic Jagged Eastern Lofoten Glacier Spire behind Runway 09 (razor-crested arêtes!)
+  const ridgeSharp = ridgedFbm(x * 0.0015 + 3.1, z * 0.0015 - 2.7, 5);
+  const dSpire = Math.hypot((x - 3220) * 0.76, z - 35);
+  if (dSpire < 1620) {
+    const s = 1 - smoothstep(35, 1620, dSpire);
+    const spireProfile = Math.pow(s, 1.38) * (570 + ridgeSharp * 470);
     h = Math.max(h, -15 + spireProfile);
   }
 
   // Secondary jagged Nordic twin peaks framing the North-East and South-East skyline
-  const dNorthHorn = Math.hypot(x - 2180, z + 1140);
-  if (dNorthHorn < 1250) {
-    const s = 1 - smoothstep(40, 1250, dNorthHorn);
-    h = Math.max(h, -10 + Math.pow(s, 1.4) * (490 + ridgeSharp * 350));
+  const dNorthHorn = Math.hypot(x - 2160, z + 1120);
+  if (dNorthHorn < 1300) {
+    const s = 1 - smoothstep(35, 1300, dNorthHorn);
+    h = Math.max(h, -12 + Math.pow(s, 1.35) * (520 + ridgeSharp * 390));
   }
-  const dSouthPeak = Math.hypot(x - 1960, z - 1180);
-  if (dSouthPeak < 1250) {
-    const s = 1 - smoothstep(40, 1250, dSouthPeak);
-    h = Math.max(h, -10 + Math.pow(s, 1.4) * (460 + ridgeSharp * 320));
-  }
-
-  // Western fjord headlands framing the approach corridor
-  const dWestNorth = Math.hypot(x + 1650, z + 1060);
-  if (dWestNorth < 1180) {
-    const s = 1 - smoothstep(45, 1180, dWestNorth);
-    h = Math.max(h, -10 + Math.pow(s, 1.4) * (430 + ridgeSharp * 290));
-  }
-  const dWestSouth = Math.hypot(x + 1500, z - 1080);
-  if (dWestSouth < 1180) {
-    const s = 1 - smoothstep(45, 1180, dWestSouth);
-    h = Math.max(h, -10 + Math.pow(s, 1.4) * (410 + ridgeSharp * 270));
+  const dSouthPeak = Math.hypot(x - 1960, z - 1160);
+  if (dSouthPeak < 1300) {
+    const s = 1 - smoothstep(35, 1300, dSouthPeak);
+    h = Math.max(h, -12 + Math.pow(s, 1.35) * (485 + ridgeSharp * 355));
   }
 
-  // Scenic outer island skerries in the western fjord bay
-  const dSkerry1 = Math.hypot(x + 980, z - 360);
-  if (dSkerry1 < 230) {
-    const s = 1 - smoothstep(45, 230, dSkerry1);
-    h = Math.max(h, -12 + s * (68 + crag * 18));
+  // Dramatic Western fjord headlands framing the approach corridor & wingman canyon shot
+  const dWestNorth = Math.hypot(x + 1580, z + 1020);
+  if (dWestNorth < 1220) {
+    const s = 1 - smoothstep(40, 1220, dWestNorth);
+    h = Math.max(h, -12 + Math.pow(s, 1.32) * (470 + ridgeSharp * 330));
   }
-  const dSkerry2 = Math.hypot(x + 1320, z + 420);
-  if (dSkerry2 < 260) {
-    const s = 1 - smoothstep(50, 260, dSkerry2);
-    h = Math.max(h, -12 + s * (88 + crag * 22));
+  const dWestSouth = Math.hypot(x + 1480, z - 1040);
+  if (dWestSouth < 1220) {
+    const s = 1 - smoothstep(40, 1220, dWestSouth);
+    h = Math.max(h, -12 + Math.pow(s, 1.32) * (445 + ridgeSharp * 310));
   }
 
-  // Sculpt Skjold Island Airstrip plateau cleanly at RUNWAY.ELEVATION (14.0m) with organic rocky coastline
-  const coastJitter = (fbm2D(x * 0.008 + 5.2, z * 0.008 - 3.1, 3) - 0.5) * 52;
-  const dx = Math.max(RUNWAY.START_X - 85 - x, 0, x - (RUNWAY.END_X + 125));
-  const dz = Math.max(-118 - z, 0, z - 98);
+  // Scenic outer rocky skerries & granite islets in the western & eastern fjord bays
+  const skerries = [
+    [-980, 360, 235, 76],
+    [-1340, -410, 270, 96],
+    [-420, -490, 175, 58],
+    [1620, -340, 220, 82],
+    [1540, 460, 240, 92],
+  ];
+  for (const [sx, sz, sRad, sPeak] of skerries) {
+    const dS = Math.hypot(x - sx, z - sz);
+    if (dS < sRad) {
+      const s = 1 - smoothstep(sRad * 0.18, sRad, dS);
+      h = Math.max(h, -14 + Math.pow(s, 1.15) * (sPeak + ridgeFine * 34));
+    }
+  }
+
+  // Sculpt Skjold Island Airstrip plateau cleanly at RUNWAY.ELEVATION (14.0m) with rugged coastal sea cliffs
+  const coastJitter = (fbm2D(x * 0.0095 + 5.2, z * 0.0095 - 3.1, 3) - 0.5) * 62;
+  const dx = Math.max(RUNWAY.START_X - 88 - x, 0, x - (RUNWAY.END_X + 135));
+  const dz = Math.max(-124 - z, 0, z - 106);
   const islandDist = Math.hypot(dx, dz) + coastJitter;
   if (islandDist < 195) {
-    const plateauMask = 1 - smoothstep(24, 195, islandDist);
-    // Keep lighthouse headland rocky at east end
+    // Steeper rocky cliff lip transitioning from ocean floor up to runway plateau
+    const plateauMask = 1 - smoothstep(18, 178, islandDist);
+    const rockyRim = smoothstep(55, 130, islandDist) * (1 - smoothstep(130, 178, islandDist)) * (crag - 0.45) * 14.0;
     const dLight = Math.hypot(x - RUNWAY.LIGHTHOUSE_X, z - RUNWAY.LIGHTHOUSE_Z);
-    const headlandBoost = (1 - smoothstep(15, 78, dLight)) * 11.5;
-    const targetH = RUNWAY.ELEVATION + headlandBoost;
+    const headlandBoost = (1 - smoothstep(14, 86, dLight)) * 13.5;
+    const targetH = RUNWAY.ELEVATION + headlandBoost + rockyRim;
     h = h * (1 - plateauMask) + targetH * plateauMask;
   }
 
   // Guarantee completely level runway strip & apron safety zone
-  if (x >= RUNWAY.START_X - 65 && x <= RUNWAY.END_X + 65 && z >= -105 && z <= 68) {
+  if (x >= RUNWAY.START_X - 65 && x <= RUNWAY.END_X + 65 && z >= -108 && z <= 70) {
     const padBlend =
-      smoothstep(RUNWAY.START_X - 65, RUNWAY.START_X - 25, x) *
-      (1 - smoothstep(RUNWAY.END_X + 25, RUNWAY.END_X + 65, x)) *
-      smoothstep(-105, -75, z) *
-      (1 - smoothstep(42, 68, z));
+      smoothstep(RUNWAY.START_X - 65, RUNWAY.START_X - 24, x) *
+      (1 - smoothstep(RUNWAY.END_X + 24, RUNWAY.END_X + 65, x)) *
+      smoothstep(-108, -74, z) *
+      (1 - smoothstep(42, 70, z));
     h = h * (1 - padBlend) + RUNWAY.ELEVATION * padBlend;
   }
 
@@ -152,7 +164,62 @@ export function isOnRunway(x, z) {
   );
 }
 
-// Build indexed terrain triangle mesh with analytical central-difference normals
+// Bake a 512x512 GPU heightmap + valley ambient occlusion texture (RGBA8) once at startup.
+// R,G = 16-bit normalized height in [HEIGHT_MIN, HEIGHT_MAX]; B = ridge/valley AO; A = coastal depth mask.
+export function buildHeightmapTextureData() {
+  const S = WORLD.HEIGHTMAP_SIZE;
+  const half = WORLD.HALF;
+  const size = WORLD.SIZE;
+  const hMin = WORLD.HEIGHT_MIN;
+  const hSpan = WORLD.HEIGHT_MAX - WORLD.HEIGHT_MIN;
+  const heights = new Float32Array(S * S);
+
+  for (let iz = 0; iz < S; iz++) {
+    const z = -half + (iz / (S - 1)) * size;
+    for (let ix = 0; ix < S; ix++) {
+      const x = -half + (ix / (S - 1)) * size;
+      heights[iz * S + ix] = getTerrainHeight(x, z);
+    }
+  }
+
+  const data = new Uint8Array(S * S * 4);
+  const dirs = [
+    [3, 0], [-3, 0], [0, 3], [0, -3],
+    [6, 6], [-6, 6], [6, -6], [-6, -6],
+  ];
+
+  for (let iz = 0; iz < S; iz++) {
+    for (let ix = 0; ix < S; ix++) {
+      const idx = iz * S + ix;
+      const h = heights[idx];
+      // R: full-range monotonic height [-40..+1060] for linear-filtered shadows & reflections
+      // G: high-precision coastal depth [-30..+30m] for artifact-free shoreline bathymetry & surf foam!
+      const normFull = clamp((h - hMin) / hSpan, 0, 1);
+      const normCoast = clamp((h + 30) / 60, 0, 1);
+
+      // Estimate horizon-occlusion / cavity AO by comparing against surrounding neighborhood
+      let occ = 0;
+      for (const [dx, dz] of dirs) {
+        const sx = clamp(ix + dx, 0, S - 1);
+        const sz = clamp(iz + dz, 0, S - 1);
+        const dh = heights[sz * S + sx] - h;
+        occ += clamp(dh / 140, 0, 1);
+      }
+      const ao = clamp(1.0 - (occ / dirs.length) * 0.92, 0.25, 1.0);
+      const landMask = smoothstep(-8, 12, h);
+
+      const base = idx * 4;
+      data[base] = Math.round(normFull * 255);
+      data[base + 1] = Math.round(normCoast * 255);
+      data[base + 2] = Math.round(ao * 255);
+      data[base + 3] = Math.round(landMask * 255);
+    }
+  }
+
+  return { width: S, height: S, data };
+}
+
+// Build high-resolution indexed terrain triangle mesh with analytical central-difference normals
 export function buildTerrainMesh() {
   const N = WORLD.GRID_N;
   const size = WORLD.SIZE;
@@ -162,7 +229,7 @@ export function buildTerrainMesh() {
   const positions = new Float32Array(vertsPerSide * vertsPerSide * 6); // pos(3) + normal(3)
 
   let ptr = 0;
-  const eps = step * 0.5;
+  const eps = step * 0.48;
   for (let iz = 0; iz <= N; iz++) {
     const z = -half + iz * step;
     for (let ix = 0; ix <= N; ix++) {
@@ -228,7 +295,6 @@ export function buildRunwayMesh() {
   const x1 = RUNWAY.END_X;
   const hw = RUNWAY.WIDTH * 0.5;
   const y = RUNWAY.SURFACE_Y;
-  // pos(3) + uv(2) where u in [0,1], v in [-1,1]
   const vertices = new Float32Array([
     x0, y, -hw, 0, -1,
     x0, y, hw, 0, 1,
@@ -240,7 +306,27 @@ export function buildRunwayMesh() {
   return { vertices, count: 6 };
 }
 
-// Helper for colored box geometry (pos 3 + normal 3 + rgba 4)
+// Geometry helpers for detailed Skjold Airstrip & Nordic Village landmarks (pos 3 + normal 3 + rgba 4)
+function pushTri(out, a, b, c, r, g, bCol, mat = 0.45) {
+  const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+  const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+  let nx = uy * vz - uz * vy;
+  let ny = uz * vx - ux * vz;
+  let nz = ux * vy - uy * vx;
+  const len = Math.hypot(nx, ny, nz) || 1;
+  nx /= len; ny /= len; nz /= len;
+  out.push(
+    a[0], a[1], a[2], nx, ny, nz, r, g, bCol, mat,
+    b[0], b[1], b[2], nx, ny, nz, r, g, bCol, mat,
+    c[0], c[1], c[2], nx, ny, nz, r, g, bCol, mat,
+  );
+}
+
+function pushQuad(out, a, b, c, d, r, g, bCol, mat = 0.45) {
+  pushTri(out, a, b, c, r, g, bCol, mat);
+  pushTri(out, a, c, d, r, g, bCol, mat);
+}
+
 function pushBox(out, cx, cy, cz, sx, sy, sz, r, g, b, mat = 0.45) {
   const hx = sx * 0.5;
   const hy = sy * 0.5;
@@ -262,6 +348,24 @@ function pushBox(out, cx, cy, cz, sx, sy, sz, r, g, b, mat = 0.45) {
   }
 }
 
+function pushPitchedRoof(out, cx, baseY, cz, sx, sy, sz, r, g, b, mat = 0.42) {
+  const hx = sx * 0.5;
+  const hz = sz * 0.5;
+  const topY = baseY + sy;
+  // Ridge running along X axis
+  const fl = [cx - hx, baseY, cz + hz];
+  const fr = [cx + hx, baseY, cz + hz];
+  const bl = [cx - hx, baseY, cz - hz];
+  const br = [cx + hx, baseY, cz - hz];
+  const rl = [cx - hx, topY, cz];
+  const rr = [cx + hx, topY, cz];
+
+  pushQuad(out, fl, fr, rr, rl, r, g, b, mat);
+  pushQuad(out, br, bl, rl, rr, r * 0.92, g * 0.92, b * 0.92, mat);
+  pushTri(out, bl, fl, rl, r * 0.8, g * 0.8, b * 0.8, mat);
+  pushTri(out, fr, br, rr, r * 0.8, g * 0.8, b * 0.8, mat);
+}
+
 function pushCylinder(out, cx, y0, cz, rBot, rTop, height, segs, r, g, b, mat = 0.45) {
   for (let i = 0; i < segs; i++) {
     const a0 = (i / segs) * Math.PI * 2;
@@ -272,8 +376,11 @@ function pushCylinder(out, cx, y0, cz, rBot, rTop, height, segs, r, g, b, mat = 
     const p1 = [cx + c1 * rBot, y0, cz + s1 * rBot];
     const p2 = [cx + c1 * rTop, y0 + height, cz + s1 * rTop];
     const p3 = [cx + c0 * rTop, y0 + height, cz + s0 * rTop];
-    const n0 = [c0, 0.12, s0];
-    const n1 = [c1, 0.12, s1];
+    const ny = (rBot - rTop) / Math.max(height, 0.1) * 0.4;
+    const l0 = Math.hypot(c0, ny, s0) || 1;
+    const l1 = Math.hypot(c1, ny, s1) || 1;
+    const n0 = [c0 / l0, ny / l0, s0 / l0];
+    const n1 = [c1 / l1, ny / l1, s1 / l1];
 
     out.push(
       p0[0], p0[1], p0[2], n0[0], n0[1], n0[2], r, g, b, mat,
@@ -287,156 +394,222 @@ function pushCylinder(out, cx, y0, cz, rBot, rTop, height, segs, r, g, b, mat = 
   }
 }
 
-// Build Skjold Airstrip landmarks: Hangars, Control Tower, Apron, Coastal Lighthouse, Pine Trees & Approach Stakes
+function pushPineTree(out, px, py, pz, scale, tintVar) {
+  // Bark trunk
+  pushCylinder(out, px, py - 0.6, pz, 0.65 * scale, 0.35 * scale, 4.4 * scale, 6, 0.22, 0.14, 0.09, 0.38);
+  // 3 layered Nordic spruce boughs with subtle color depth
+  const gBase = 0.15 + tintVar * 0.05;
+  const rBase = 0.04 + tintVar * 0.02;
+  const bBase = 0.07 + tintVar * 0.03;
+  pushCylinder(out, px, py + 2.4 * scale, pz, 4.9 * scale, 1.1 * scale, 8.2 * scale, 7, rBase, gBase, bBase, 0.34);
+  pushCylinder(out, px, py + 7.2 * scale, pz, 3.8 * scale, 0.8 * scale, 7.6 * scale, 7, rBase + 0.015, gBase + 0.035, bBase + 0.015, 0.34);
+  pushCylinder(out, px, py + 11.8 * scale, pz, 2.5 * scale, 0.15 * scale, 6.4 * scale, 7, rBase + 0.03, gBase + 0.06, bBase + 0.025, 0.35);
+}
+
+// Build Skjold Airstrip landmarks: Hangars, ATC Tower, Nordic Rorbuer Village, Coastal Lighthouse, Pines & Approach Lights
 export function buildLandmarksMesh() {
   const out = [];
   const y = RUNWAY.ELEVATION;
 
-  // Taxiway & concrete hangar apron North of Runway 09
-  pushBox(out, 470, y + 0.18, -60, 310, 0.36, 48, 0.25, 0.27, 0.30, 0.35);
-  pushBox(out, 270, y + 0.18, -36, 22, 0.36, 24, 0.23, 0.25, 0.28, 0.35);
-  pushBox(out, 660, y + 0.18, -36, 22, 0.36, 24, 0.23, 0.25, 0.28, 0.35);
+  // 1. Concrete hangar apron, connecting taxiways & yellow taxiway center stripes
+  pushBox(out, 470, y + 0.16, -62, 340, 0.32, 52, 0.22, 0.24, 0.27, 0.38);
+  pushBox(out, 270, y + 0.16, -36, 22, 0.32, 26, 0.20, 0.22, 0.25, 0.38);
+  pushBox(out, 660, y + 0.16, -36, 22, 0.32, 26, 0.20, 0.22, 0.25, 0.38);
+  pushBox(out, 470, y + 0.34, -48, 300, 0.06, 0.9, 0.94, 0.72, 0.14, 0.42);
 
-  // Twin Nordic Aviation Hangars (slate walls, crimson-red pitched roofs, open hangar doors)
-  for (const hx of [355, 430]) {
-    pushBox(out, hx, y + 7.5, -80, 44, 15, 30, 0.72, 0.75, 0.78, 0.45);
-    pushBox(out, hx, y + 16.5, -80, 47, 3.2, 33, 0.68, 0.18, 0.14, 0.40);
-    // Dark recessed hangar bay door facing the runway
-    pushBox(out, hx, y + 5.8, -64.6, 28, 11.2, 1.0, 0.09, 0.12, 0.16, 0.6);
-    // Warm hangar interior strip glow
-    pushBox(out, hx, y + 11.0, -64.0, 26, 0.8, 0.5, 1.0, 0.82, 0.45, 0.05);
+  // 2. Twin Sculpted Nordic Aviation Hangars (weathered steel walls, pitched crimson Nordic roofs, glowing bays)
+  for (const hx of [348, 428]) {
+    pushBox(out, hx, y + 7.4, -82, 48, 14.8, 32, 0.72, 0.75, 0.79, 0.48);
+    pushPitchedRoof(out, hx, y + 14.8, -82, 52, 6.8, 36, 0.66, 0.16, 0.12, 0.42);
+    // Dark recessed hangar bay door facing Runway 09
+    pushBox(out, hx, y + 5.8, -65.6, 30, 11.4, 1.2, 0.06, 0.09, 0.14, 0.62);
+    // Warm illuminated hangar interior ceiling & amber floodlight strip
+    pushBox(out, hx, y + 11.2, -65.0, 28, 1.0, 0.6, 1.0, 0.80, 0.40, 0.05);
+    pushBox(out, hx - 18, y + 9.5, -65.6, 4.2, 2.2, 0.4, 0.95, 0.84, 0.52, 0.06);
+    pushBox(out, hx + 18, y + 9.5, -65.6, 4.2, 2.2, 0.4, 0.95, 0.84, 0.52, 0.06);
   }
 
-  // Air Traffic Control Tower (tall concrete shaft + panoramic tinted glass cab + radar dome)
+  // 3. Detailed Air Traffic Control Tower (flared concrete shaft, catwalk, canted panoramic glass cab, radar dome)
   const tx = RUNWAY.TOWER_X;
   const tz = RUNWAY.TOWER_Z;
-  pushBox(out, tx, y + 12, tz, 11, 24, 11, 0.78, 0.80, 0.83, 0.4);
-  pushBox(out, tx, y + 25.5, tz, 16, 3.2, 16, 0.22, 0.27, 0.34, 0.5);
-  // Tinted glass observation cab (glossy)
-  pushBox(out, tx, y + 29.8, tz, 15.2, 5.4, 15.2, 0.10, 0.32, 0.42, 0.92);
-  // Illuminated green ATC interior band
-  pushBox(out, tx, y + 28.2, tz, 15.4, 0.7, 15.4, 0.25, 0.95, 0.65, 0.05);
-  // Roof cap & red aviation obstruction beacon
-  pushBox(out, tx, y + 33.4, tz, 17.5, 1.8, 17.5, 0.76, 0.20, 0.16, 0.42);
-  pushCylinder(out, tx, y + 34.3, tz, 0.5, 0.35, 7.5, 8, 0.85, 0.87, 0.90, 0.5);
-  pushBox(out, tx, y + 42.2, tz, 1.8, 1.8, 1.8, 1.0, 0.18, 0.15, 0.05);
+  pushCylinder(out, tx, y, tz, 7.6, 5.8, 24.5, 8, 0.76, 0.79, 0.82, 0.44);
+  pushCylinder(out, tx, y + 24.5, tz, 6.2, 9.6, 3.0, 8, 0.20, 0.25, 0.32, 0.52);
+  // Panoramic canted tinted glass cab (glossy reflective)
+  pushCylinder(out, tx, y + 27.5, tz, 8.8, 9.8, 5.8, 8, 0.08, 0.28, 0.38, 0.94);
+  // Illuminated emerald ATC console interior band visible through glass
+  pushCylinder(out, tx, y + 28.4, tz, 8.95, 9.05, 0.9, 8, 0.25, 1.0, 0.68, 0.05);
+  // Overhanging crimson-trimmed roof cap & radome + obstruction beacon
+  pushCylinder(out, tx, y + 33.3, tz, 10.6, 9.8, 1.8, 8, 0.72, 0.18, 0.14, 0.45);
+  pushCylinder(out, tx, y + 35.1, tz, 3.2, 2.4, 3.2, 10, 0.92, 0.94, 0.96, 0.55);
+  pushCylinder(out, tx, y + 35.1, tz + 4.0, 0.35, 0.25, 8.5, 8, 0.85, 0.87, 0.90, 0.55);
+  pushBox(out, tx, y + 44.0, tz + 4.0, 1.9, 1.9, 1.9, 1.0, 0.14, 0.12, 0.05);
 
-  // Fuel Depot Tanks (white/amber aviation fuel silos East of tower)
-  for (const fx of [580, 606]) {
-    pushCylinder(out, fx, y, -82, 7.5, 7.5, 11.5, 12, 0.88, 0.90, 0.92, 0.5);
-    pushCylinder(out, fx, y + 5.0, -82, 7.65, 7.65, 1.8, 12, 0.92, 0.56, 0.10, 0.45);
+  // 4. Aviation Fuel Depot Tanks East of Tower
+  for (const fx of [578, 606, 634]) {
+    pushCylinder(out, fx, y, -82, 7.4, 7.4, 12.0, 14, 0.88, 0.90, 0.92, 0.55);
+    pushCylinder(out, fx, y + 5.2, -82, 7.55, 7.55, 1.8, 14, 0.94, 0.54, 0.08, 0.48);
+    pushCylinder(out, fx, y + 12.0, -82, 7.4, 0.5, 2.0, 14, 0.82, 0.85, 0.88, 0.55);
   }
 
-  // Coastal Stone Lighthouse on the Eastern Headland (iconic red/white Nordic bands + glowing lantern)
+  // 5. Picturesque Nordic Rorbuer Fishing Village & Timber Pier along the South Cove (clearly visible on approach!)
+  const cabins = [
+    [320, 82, 18, 9.2, 13, [0.68, 0.14, 0.11]],  // Falu red boathouse near approach
+    [354, 86, 17, 8.8, 12, [0.80, 0.52, 0.14]],  // Warm Nordic ochre cabin
+    [388, 84, 20, 9.8, 14, [0.66, 0.15, 0.12]],  // Red waterfront lodge
+    [424, 88, 16, 8.5, 12, [0.90, 0.90, 0.88]],  // White timber house
+    [940, 82, 18, 9.2, 13, [0.68, 0.14, 0.11]],  // East cove red rorbu
+    [974, 86, 17, 8.8, 12, [0.78, 0.50, 0.13]],  // East cove ochre cabin
+    [1010, 84, 19, 9.6, 13, [0.66, 0.14, 0.11]], // East cove lighthouse keeper lodge
+  ];
+  for (const [cx, cz, sx, sy, sz, wallCol] of cabins) {
+    const cy = Math.max(4.5, getTerrainHeight(cx, cz) - 1.0);
+    pushBox(out, cx, cy + 1.2, cz, sx + 1.2, 2.8, sz + 1.2, 0.28, 0.30, 0.34, 0.38);
+    pushBox(out, cx, cy + 2.4 + sy * 0.5, cz, sx, sy, sz, wallCol[0], wallCol[1], wallCol[2], 0.42);
+    pushPitchedRoof(out, cx, cy + 2.4 + sy, cz, sx + 2.4, sy * 0.62, sz + 2.6, 0.14, 0.17, 0.22, 0.45);
+    for (const wxOff of [-sx * 0.24, sx * 0.24]) {
+      pushBox(out, cx + wxOff, cy + 2.4 + sy * 0.52, cz - sz * 0.51, 2.8, 2.6, 0.35, 1.0, 0.80, 0.38, 0.05);
+      pushBox(out, cx + wxOff, cy + 2.4 + sy * 0.52, cz + sz * 0.51, 2.8, 2.6, 0.35, 1.0, 0.80, 0.38, 0.05);
+    }
+  }
+  // Wooden waterfront pier jutting into south cove + moored white & crimson fishing boat
+  pushBox(out, 372, 2.2, 122, 14, 1.4, 46, 0.36, 0.26, 0.18, 0.38);
+  for (const pz of [104, 120, 136, 144]) {
+    pushCylinder(out, 366, -4, pz, 0.7, 0.7, 7.2, 6, 0.24, 0.18, 0.12, 0.35);
+    pushCylinder(out, 378, -4, pz, 0.7, 0.7, 7.2, 6, 0.24, 0.18, 0.12, 0.35);
+  }
+  pushBox(out, 392, 1.3, 134, 5.5, 2.6, 14.0, 0.90, 0.92, 0.94, 0.55);
+  pushBox(out, 392, 3.2, 131, 3.8, 2.4, 5.0, 0.76, 0.18, 0.14, 0.45);
+
+  // 6. Iconic Coastal Stone Lighthouse on Eastern Headland (smooth 16-seg bands + gallery + glowing lantern)
   const lx = RUNWAY.LIGHTHOUSE_X;
   const lz = RUNWAY.LIGHTHOUSE_Z;
-  const ly = getTerrainHeight(lx, lz) - 1.5;
-  pushCylinder(out, lx, ly, lz, 7.5, 6.2, 12, 12, 0.92, 0.92, 0.90, 0.42);
-  pushCylinder(out, lx, ly + 12, lz, 6.2, 5.1, 10, 12, 0.78, 0.16, 0.13, 0.42);
-  pushCylinder(out, lx, ly + 22, lz, 5.1, 4.2, 9, 12, 0.92, 0.92, 0.90, 0.42);
-  pushCylinder(out, lx, ly + 31, lz, 4.9, 4.9, 1.8, 12, 0.18, 0.20, 0.24, 0.5);
-  // Glowing golden lighthouse beacon lantern
-  pushCylinder(out, lx, ly + 32.8, lz, 3.6, 3.6, 5.0, 12, 1.0, 0.88, 0.48, 0.05);
-  pushCylinder(out, lx, ly + 37.8, lz, 4.6, 0.4, 4.5, 12, 0.74, 0.15, 0.12, 0.45);
+  const ly = getTerrainHeight(lx, lz) - 2.0;
+  pushCylinder(out, lx, ly, lz, 8.2, 6.6, 13, 16, 0.94, 0.93, 0.90, 0.44);
+  pushCylinder(out, lx, ly + 13, lz, 6.6, 5.4, 11, 16, 0.80, 0.15, 0.12, 0.44);
+  pushCylinder(out, lx, ly + 24, lz, 5.4, 4.4, 10, 16, 0.94, 0.93, 0.90, 0.44);
+  pushCylinder(out, lx, ly + 34, lz, 5.6, 5.6, 2.0, 16, 0.16, 0.19, 0.24, 0.55);
+  // Blazing golden Fresnel lantern room
+  pushCylinder(out, lx, ly + 36.0, lz, 3.8, 3.8, 5.6, 16, 1.0, 0.88, 0.44, 0.05);
+  // Pointed crimson lighthouse cupola
+  pushCylinder(out, lx, ly + 41.6, lz, 5.0, 0.35, 5.2, 16, 0.76, 0.14, 0.11, 0.48);
 
-  // Approach Lead-in Light Towers West of Runway 09 threshold (standing on sea pilings!)
-  for (let i = 1; i <= 4; i++) {
-    const ax = RUNWAY.START_X - i * 85;
-    const ay = RUNWAY.ELEVATION - 1.5 - i * 1.6;
-    pushBox(out, ax, ay * 0.5, 0, 1.4, ay + 12, 1.4, 0.35, 0.38, 0.42, 0.4);
-    pushBox(out, ax, ay + 0.5, 0, 1.8, 1.2, 18, 0.82, 0.84, 0.86, 0.45);
-    for (const lzOff of [-7, -3.5, 0, 3.5, 7]) {
-      pushBox(out, ax - 0.6, ay + 1.4, lzOff, 1.4, 1.4, 1.4, 1.0, 0.96, 0.78, 0.05);
+  // 7. Approach Lead-in Light Towers West of Runway 09 threshold (standing on sea pilings over the fjord!)
+  for (let i = 1; i <= 5; i++) {
+    const ax = RUNWAY.START_X - i * 82;
+    const ay = RUNWAY.ELEVATION - 1.2 - i * 1.4;
+    pushBox(out, ax, ay * 0.5 - 2.0, -5.5, 1.2, ay + 14, 1.2, 0.30, 0.34, 0.38, 0.42);
+    pushBox(out, ax, ay * 0.5 - 2.0, 5.5, 1.2, ay + 14, 1.2, 0.30, 0.34, 0.38, 0.42);
+    pushBox(out, ax, ay + 0.5, 0, 1.8, 1.1, 20, 0.84, 0.86, 0.88, 0.46);
+    for (const lzOff of [-8, -4, 0, 4, 8]) {
+      pushBox(out, ax - 0.8, ay + 1.5, lzOff, 1.6, 1.6, 1.6, 1.0, 0.95, 0.76, 0.04);
     }
   }
 
-  // PAPI glideslope mounting plinth (dark metallic bar so 2-WHITE / 2-RED lamps stand out crisply!)
-  pushBox(out, RUNWAY.PAPI_X, y + 0.9, RUNWAY.PAPI_Z - 12.75, 4.2, 1.8, 32.0, 0.12, 0.14, 0.18, 0.45);
+  // Runway 09 Green Threshold Light Bar & 27 Red End Light Bar
+  for (let lzOff = -22; lzOff <= 22; lzOff += 5.5) {
+    pushBox(out, RUNWAY.START_X - 2.0, RUNWAY.SURFACE_Y + 0.7, lzOff, 1.4, 1.2, 1.4, 0.18, 1.0, 0.45, 0.04);
+    pushBox(out, RUNWAY.END_X + 2.0, RUNWAY.SURFACE_Y + 0.7, lzOff, 1.4, 1.2, 1.4, 1.0, 0.20, 0.18, 0.04);
+  }
 
-  // Stylized Nordic Spruce Pine Clusters along the airstrip perimeter & coastal ridges
+  // PAPI glideslope mounting plinth (dark matte bar so 2-WHITE / 2-RED lamps pop vividly!)
+  pushBox(out, RUNWAY.PAPI_X, y + 0.9, RUNWAY.PAPI_Z - 12.75, 4.4, 1.8, 33.0, 0.10, 0.12, 0.16, 0.45);
+
+  // 8. Rich 3-Tiered Nordic Spruce Pine Groves across Skjold Island & nearby outer skerries (keeping runway approach crystal clear!)
   const rng = createRng(409);
-  for (let i = 0; i < 95; i++) {
-    const px = -90 + rng() * 1300;
-    const pz = rng() < 0.5 ? (48 + rng() * 68) : (-105 - rng() * 48);
-    if (Math.abs(px - tx) < 40 && Math.abs(pz - tz) < 35) continue;
-    if (px > 315 && px < 480 && pz < -52) continue;
+  for (let i = 0; i < 165; i++) {
+    let px, pz;
+    if (i < 130) {
+      px = -75 + rng() * 1320;
+      pz = rng() < 0.5 ? (46 + rng() * 76) : (-106 - rng() * 56);
+    } else {
+      const sk = i % 2 === 0 ? [-980, 360] : [-1340, -410];
+      px = sk[0] + (rng() - 0.5) * 210;
+      pz = sk[1] + (rng() - 0.5) * 210;
+    }
+    if (Math.abs(px - tx) < 42 && Math.abs(pz - tz) < 38) continue;
+    if (px > 300 && px < 485 && pz < -50) continue;
+    if (px > 295 && px < 455 && pz > 58) continue; // Keep south village clear
+    if (px > 915 && px < 1045 && pz > 60) continue; // Keep east cove village clear
+    if (Math.hypot(px - lx, pz - lz) < 36) continue;
     const py = getTerrainHeight(px, pz);
     if (py < 4.5) continue;
-    const scale = 0.8 + rng() * 0.75;
-    pushCylinder(out, px, py - 0.5, pz, 0.7 * scale, 0.4 * scale, 4.0 * scale, 6, 0.24, 0.16, 0.10, 0.4);
-    pushCylinder(out, px, py + 2.8 * scale, pz, 4.4 * scale, 0.4 * scale, 10.5 * scale, 7, 0.06, 0.18, 0.10, 0.35);
-    pushCylinder(out, px, py + 8.5 * scale, pz, 3.1 * scale, 0.2 * scale, 8.2 * scale, 7, 0.08, 0.22, 0.13, 0.35);
+    const scale = 0.78 + rng() * 0.85;
+    pushPineTree(out, px, py, pz, scale, rng());
   }
 
   return { vertices: new Float32Array(out), count: out.length / 10 };
 }
 
-// Build sunlit 3D volumetric cloud clusters floating majestically over the fjord peaks
-export function buildCloudsMesh(seed = 7) {
+// Build translucent volumetric lighthouse beam cone (origin at 0,0,0 pointing along +X)
+export function buildLighthouseBeamGeometry() {
+  const out = [];
+  const segs = 14;
+  const len = 460;
+  const r0 = 3.5;
+  const r1 = 54.0;
+  for (let i = 0; i < segs; i++) {
+    const a0 = (i / segs) * Math.PI * 2;
+    const a1 = ((i + 1) / segs) * Math.PI * 2;
+    const c0 = Math.cos(a0), s0 = Math.sin(a0);
+    const c1 = Math.cos(a1), s1 = Math.sin(a1);
+    const p0 = [0, c0 * r0, s0 * r0, 1.0, 0.90, 0.55, 0.42];
+    const p1 = [0, c1 * r0, s1 * r0, 1.0, 0.90, 0.55, 0.42];
+    const p2 = [len, c1 * r1, s1 * r1, 1.0, 0.84, 0.45, 0.0];
+    const p3 = [len, c0 * r1, s0 * r1, 1.0, 0.84, 0.45, 0.0];
+    out.push(...p0, ...p1, ...p2, ...p0, ...p2, ...p3);
+  }
+  return { vertices: new Float32Array(out), count: out.length / 7 };
+}
+
+// Build soft volumetric camera-facing cloud billboard puffs floating gracefully around fjord ridges.
+// Vertex layout (10 floats): center(3), cornerUv(2), size(2), params(3: seed, heightFrac, density)
+export function buildCloudBillboards(seed = 11) {
   const rng = createRng(seed);
   const out = [];
 
-  // Push soft icosphere-like multi-faceted puff
-  function pushPuff(cx, cy, cz, rx, ry, rz) {
-    const stacks = 5;
-    const slices = 8;
-    for (let i = 0; i < stacks; i++) {
-      const phi0 = (i / stacks) * Math.PI;
-      const phi1 = ((i + 1) / stacks) * Math.PI;
-      for (let j = 0; j < slices; j++) {
-        const th0 = (j / slices) * Math.PI * 2;
-        const th1 = ((j + 1) / slices) * Math.PI * 2;
+  const corners = [
+    [-1, -1], [1, -1], [1, 1],
+    [-1, -1], [1, 1], [-1, 1],
+  ];
 
-        const pts = [
-          [Math.sin(phi0) * Math.cos(th0), Math.cos(phi0), Math.sin(phi0) * Math.sin(th0)],
-          [Math.sin(phi1) * Math.cos(th0), Math.cos(phi1), Math.sin(phi1) * Math.sin(th0)],
-          [Math.sin(phi1) * Math.cos(th1), Math.cos(phi1), Math.sin(phi1) * Math.sin(th1)],
-          [Math.sin(phi0) * Math.cos(th1), Math.cos(phi0), Math.sin(phi0) * Math.sin(th1)],
-        ];
-        const tris = [0, 1, 2, 0, 2, 3];
-        for (const k of tris) {
-          const n = pts[k];
-          // Warm sunlit tops, soft lavender-slate cloud bellies
-          const shade = clamp(n[1] * 0.5 + 0.55, 0.25, 1.0);
-          const r = 0.72 + 0.28 * shade;
-          const g = 0.68 + 0.26 * shade;
-          const b = 0.72 + 0.20 * shade;
-          out.push(
-            cx + n[0] * rx, cy + n[1] * ry, cz + n[2] * rz,
-            n[0], n[1] * 0.9 + 0.25, n[2],
-            r, g, b, 0.35
-          );
-        }
-      }
-    }
-  }
-
-  // Hand-placed dramatic banks + procedural fjord cumulus clusters
+  // Dramatic fjord cumulus & mist anchors framing the peaks without obstructing runway approach
   const anchors = [
-    [2450, 680, -720, 1.3],
-    [3250, 790, 520, 1.5],
-    [1550, 620, 1080, 1.1],
-    [980, 740, -1350, 1.2],
-    [-850, 690, -1120, 1.25],
-    [-1250, 640, 1020, 1.15],
-    [2800, 880, -1650, 1.4],
-    [420, 760, 1650, 1.3],
-    [-2100, 710, -450, 1.2],
-    [3800, 740, -280, 1.35],
-    [-420, 810, -2100, 1.4],
-    [1820, 640, -1720, 1.2],
+    [2550, 740, -820, 1.35],
+    [3350, 860, 560, 1.50],
+    [1680, 660, 1180, 1.20],
+    [1020, 790, -1420, 1.30],
+    [-920, 720, -1180, 1.25],
+    [-1320, 680, 1080, 1.20],
+    [2900, 940, -1700, 1.45],
+    [480, 810, 1720, 1.35],
+    [-2250, 760, -480, 1.25],
+    [3900, 810, -260, 1.40],
+    [-460, 850, -2180, 1.45],
+    [1880, 680, -1820, 1.25],
+    [2400, 420, 1450, 1.05], // Lower valley mist puff clinging to southern cliffs
+    [2200, 440, -1350, 1.05], // Lower valley mist puff clinging to northern cliffs
   ];
 
   for (const [bx, by, bz, sc] of anchors) {
-    const puffs = 4 + Math.floor(rng() * 3);
+    const puffs = 7 + Math.floor(rng() * 5);
     for (let p = 0; p < puffs; p++) {
-      const ox = (rng() - 0.5) * 260 * sc;
-      const oy = (rng() - 0.35) * 42 * sc;
-      const oz = (rng() - 0.5) * 210 * sc;
-      const rx = (95 + rng() * 90) * sc;
-      const ry = (28 + rng() * 26) * sc;
-      const rz = (80 + rng() * 80) * sc;
-      pushPuff(bx + ox, by + oy, bz + oz, rx, ry, rz);
+      const ox = (rng() - 0.5) * 420 * sc;
+      const oy = (rng() - 0.42) * 85 * sc;
+      const oz = (rng() - 0.5) * 340 * sc;
+      const sx = (165 + rng() * 140) * sc;
+      const sy = (78 + rng() * 68) * sc;
+      const pSeed = rng() * 100.0;
+      const heightFrac = clamp((oy / (85 * sc)) + 0.5, 0, 1);
+      const density = 0.55 + rng() * 0.35;
+
+      for (const [cu, cv] of corners) {
+        out.push(
+          bx + ox, by + oy, bz + oz,
+          cu, cv,
+          sx, sy,
+          pSeed, heightFrac, density
+        );
+      }
     }
   }
 

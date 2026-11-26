@@ -67,8 +67,8 @@ export class FlightWorld {
     const f = craft.basis.forward;
     const r = craft.basis.right;
     const u = craft.basis.up;
-    const leftTip = vec3Add(craft.pos, vec3Add(vec3Scale(r, -7.0), vec3Add(vec3Scale(f, -3.7), vec3Scale(u, -0.15))));
-    const rightTip = vec3Add(craft.pos, vec3Add(vec3Scale(r, 7.0), vec3Add(vec3Scale(f, -3.7), vec3Scale(u, -0.15))));
+    const leftTip = vec3Add(craft.pos, vec3Add(vec3Scale(r, -7.08), vec3Add(vec3Scale(f, -4.95), vec3Scale(u, -0.15))));
+    const rightTip = vec3Add(craft.pos, vec3Add(vec3Scale(r, 7.08), vec3Add(vec3Scale(f, -4.95), vec3Scale(u, -0.15))));
 
     for (let i = points - 1; i >= 0; i--) {
       const back = vec3Scale(f, -i * spacingM);
@@ -144,8 +144,8 @@ export class FlightWorld {
         const r = craft.basis.right;
         const u = craft.basis.up;
         const alpha = craft.afterburner ? 0.58 : Math.min(0.48, 0.16 + Math.abs(craft.gLoad - 1) * 0.18 + (craft.speed - 75) * 0.002);
-        const lTip = vec3Add(craft.pos, vec3Add(vec3Scale(r, -7.0), vec3Add(vec3Scale(f, -3.7), vec3Scale(u, -0.15))));
-        const rTip = vec3Add(craft.pos, vec3Add(vec3Scale(r, 7.0), vec3Add(vec3Scale(f, -3.7), vec3Scale(u, -0.15))));
+        const lTip = vec3Add(craft.pos, vec3Add(vec3Scale(r, -7.08), vec3Add(vec3Scale(f, -4.95), vec3Scale(u, -0.15))));
+        const rTip = vec3Add(craft.pos, vec3Add(vec3Scale(r, 7.08), vec3Add(vec3Scale(f, -4.95), vec3Scale(u, -0.15))));
         this.contrails[0].push({ x: lTip.x, y: lTip.y, z: lTip.z, alpha });
         this.contrails[1].push({ x: rTip.x, y: rTip.y, z: rTip.z, alpha });
         if (this.contrails[0].length > 34) this.contrails[0].shift();
