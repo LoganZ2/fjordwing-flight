@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FJORDWING — VX-9 Kestrel Alpine Flight Simulator</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="viewport">
+    <canvas id="gl-canvas"></canvas>
+    <canvas id="hud-canvas"></canvas>
+
+    <!-- Translucent Mission Briefing / Hangar Overlay -->
+    <section id="briefing-overlay" class="overlay">
+      <header class="briefing-header">
+        <div class="brand-block">
+          <div class="brand-kicker">SKJOLD FJORD ARCHIPELAGO · SECTOR 09</div>
+          <h1 class="brand-title">FJORDWING</h1>
+          <div class="brand-sub">VX-9 KESTREL · AERIAL INTERCEPT &amp; ALPINE ILS SIMULATOR</div>
+        </div>
+        <div class="spec-strip">
+          <div class="spec-item"><span>AIRFRAME</span><strong>VX-9 KESTREL</strong></div>
+          <div class="spec-item"><span>RUNWAY</span><strong>SKJOLD 09/27</strong></div>
+          <div class="spec-item"><span>THRUST</span><strong>54 kN + A/B</strong></div>
+          <div class="spec-item"><span>AVIONICS</span><strong>G-PFD / ILS</strong></div>
+        </div>
+      </header>
+
+      <div class="briefing-footer">
+        <div class="mission-section">
+          <div class="section-label">SELECT SORTIE MISSION</div>
+          <div id="mission-cards" class="mission-grid"></div>
+        </div>
+
+        <aside class="controls-panel">
+          <div class="section-label">FLIGHT DECK CONTROLS</div>
+          <ul class="key-list">
+            <li><kbd>W/S</kbd> <kbd>A/D</kbd> <span>Pitch &amp; Roll (or Arrows)</span></li>
+            <li><kbd>Q/E</kbd> <span>Rudder Yaw</span></li>
+            <li><kbd>Shift</kbd> <kbd>Ctrl</kbd> <span>Throttle Up / Down</span></li>
+            <li><kbd>Space</kbd> <span>Afterburner Boost</span></li>
+            <li><kbd>V</kbd> <kbd>G</kbd> <kbd>B</kbd> <span>Flaps · Gear · Airbrake</span></li>
+            <li><kbd>C</kbd> <span>Chase / Glass Cockpit / Wingman</span></li>
+            <li><kbd>1–3</kbd> <kbd>P</kbd> <kbd>R</kbd> <kbd>M</kbd> <span>Mission · Pause · Reset · Mute</span></li>
+          </ul>
+          <div class="action-row">
+            <button id="btn-yoke-toggle" class="btn-secondary" type="button">MOUSE YOKE: OFF</button>
+            <button id="btn-launch" class="btn-primary" type="button">LAUNCH SORTIE →</button>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- Pause Overlay -->
+    <section id="pause-overlay" class="overlay modal-center hidden">
+      <div class="modal-card">
+        <div class="brand-kicker">FLIGHT PAUSED</div>
+        <h2 class="modal-title">COCKPIT HOLD</h2>
+        <p class="modal-note">Press <strong>C</strong> in flight to switch between Chase, Illuminated Glass Cockpit, and Wingman views.</p>
+        <div class="modal-actions">
+          <button id="btn-resume" class="btn-primary" type="button">RESUME FLIGHT</button>
+          <button id="btn-restart-pause" class="btn-secondary" type="button">RESTART SORTIE</button>
+          <button id="btn-menu-pause" class="btn-secondary" type="button">MISSION BRIEFING</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- End-of-Sortie Debrief Overlay -->
+    <section id="debrief-overlay" class="overlay modal-center hidden">
+      <div class="modal-card debrief-card">
+        <div id="debrief-subtitle" class="brand-kicker">MSN 01 · FJORD RING RALLY</div>
+        <h2 id="debrief-title" class="debrief-title success">SMOOTH LANDING</h2>
+        <div class="stats-grid">
+          <div class="stat-cell"><span>SORTIE TIME</span><strong id="stat-time">00:00.0</strong></div>
+          <div class="stat-cell"><span>GATES CLEARED</span><strong id="stat-gates">0 / 0</strong></div>
+          <div class="stat-cell"><span>FUEL LEFT</span><strong id="stat-fuel">0%</strong></div>
+          <div class="stat-cell"><span>HULL INTEGRITY</span><strong id="stat-hull">100%</strong></div>
+          <div class="stat-cell stat-wide"><span>SORTIE SCORE</span><strong id="stat-score">0</strong></div>
+        </div>
+        <div class="modal-actions">
+          <button id="btn-retry" class="btn-primary" type="button">FLY AGAIN [R]</button>
+          <button id="btn-debrief-menu" class="btn-secondary" type="button">SELECT MISSION</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

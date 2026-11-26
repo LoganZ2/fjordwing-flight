@@ -1,0 +1,6 @@
+[
+  { "name": "1-chase-fjord.jpg", "query": "?shot=chase&seed=1" },
+  { "name": "2-cockpit-hud.jpg", "query": "?shot=cockpit&seed=1" },
+  { "name": "3-runway-approach.jpg", "query": "?shot=approach&seed=1" },
+  { "name": "4-mission-briefing.jpg", "query": "?shot=briefing&seed=1" }
+]
